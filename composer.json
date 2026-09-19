@@ -1,0 +1,39 @@
+{
+    "name": "timohubois/remote-media-proxy",
+    "description": "Use production media on local and staging WordPress sites without copying the uploads library.",
+    "type": "wordpress-plugin",
+    "license": "GPL-3.0-or-later",
+    "authors": [
+        {
+            "name": "Timo Hubois",
+            "homepage": "https://pixelsaft.wtf"
+        }
+    ],
+    "config": {
+        "sort-packages": true,
+        "optimize-autoloader": true,
+        "allow-plugins": {
+            "dealerdirect/phpcodesniffer-composer-installer": true
+        }
+    },
+    "require": {
+        "php": "^8.1"
+    },
+    "require-dev": {
+        "dealerdirect/phpcodesniffer-composer-installer": "^1.0",
+        "php-stubs/wordpress-stubs": "^7.1",
+        "phpcompatibility/phpcompatibility-wp": "^2.1",
+        "rector/rector": "^2.6",
+        "wp-coding-standards/wpcs": "^3.0"
+    },
+    "autoload": {
+        "psr-4": {
+            "RemoteMediaProxy\\": "classes/"
+        }
+    },
+    "scripts": {
+        "php:lint": "vendor/bin/phpcs --standard=phpcs.xml .",
+        "php:lint:fix": "vendor/bin/phpcbf --standard=phpcs.xml .",
+        "rector:run": "vendor/bin/rector process --dry-run"
+    }
+}
