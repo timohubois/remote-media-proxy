@@ -25,6 +25,10 @@ The plugin extends **Settings > Media** with an enable checkbox, a remote site U
 * Automatically configure missing-upload routing on supported Apache layouts.
 * Support single-site and Multisite without requiring a particular theme or source-side helper.
 
+== Want to contribute? ==
+
+Check out the plugin [GitHub Repository](https://github.com/timohubois/remote-media-proxy/).
+
 == Installation ==
 
 = INSTALL MANUALLY =

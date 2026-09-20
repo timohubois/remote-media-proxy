@@ -69,6 +69,10 @@ Use PHP 8.3 for development and CI. Plugin code must remain compatible with PHP 
 
 Development dependencies and this README are excluded from installation ZIPs by `.distignore`. WordPress and local-server configuration are not part of this repository. No release or publishing commands are configured.
 
+## Want to contribute?
+
+Report issues and submit improvements through the [GitHub repository](https://github.com/timohubois/remote-media-proxy/).
+
 ## License
 
 GPLv3 or later. See [LICENSE](LICENSE).
