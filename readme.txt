@@ -3,7 +3,7 @@ Contributors: timohubois
 Tags: uploads, development, media, proxy
 Requires at least: 7.0
 Tested up to: 7.1
-Stable tag: 0.1.0
+Stable tag: 1.0.0
 Requires PHP: 8.1
 License: GPLv3 or later
 License URI: https://www.gnu.org/licenses/gpl-3.0.html
@@ -108,10 +108,12 @@ Routing is reconciled on activation, settings changes and authorized admin visit
 
 Disabling or deactivating clears owned routing directives and keeps settings. Uninstall also removes the plugin's settings, never media. Harmless marker comments and the shared .htaccess file remain. Cleanup failures are reported so they can be resolved and retried.
 
-Disable routing before moving WordPress or its content directory. When switching from an earlier development build with a different name, deactivate it before removing or renaming its directory, then activate this plugin and re-enter settings. Old settings, custom filter names and routing markers are not migrated; leftover old blocks require manual cleanup. Avoid running overlapping upload proxies.
+Disable routing before moving WordPress or its content directory. Avoid running overlapping upload proxies.
 
 == Changelog ==
 
-= 0.1.0 =
-* Add opt-in remote media proxying and read-only PHP attachment streams.
-* Add automatic Apache routing and lifecycle cleanup.
+= 1.0.0 =
+* Initial release with opt-in remote media proxying and read-only PHP attachment streams.
+* Automatic Apache routing and lifecycle cleanup.
+* Configuration through Media settings, wp-config.php constants and the options filter.
+* Encrypted storage for saved passwords and masked password controls.

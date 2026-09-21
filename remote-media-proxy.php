@@ -4,7 +4,7 @@
  * Plugin Name:       Remote Media Proxy
  * Plugin URI:        https://github.com/timohubois/remote-media-proxy/
  * Description:       Use production media on local and staging WordPress sites without copying the uploads library.
- * Version:           0.1.0
+ * Version:           1.0.0
  * Requires at least: 7.0
  * Requires PHP:      8.1
  * Author:            Timo Hubois
