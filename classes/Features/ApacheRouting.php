@@ -233,6 +233,10 @@ final class ApacheRouting
     private static function fail(string $reason): bool
     {
         self::$failure = $reason;
+        if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
+            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Log routing failures only when debug logging is enabled.
+            error_log('Remote Media Proxy (site ' . get_current_blog_id() . '): ' . sanitize_text_field($reason));
+        }
         return false;
     }
 
