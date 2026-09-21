@@ -55,12 +55,41 @@ final class OptionsMedia
             'type' => 'array',
             'sanitize_callback' => [$this, 'sanitizeOptions'],
         ]);
-        add_settings_field(
+        add_settings_section(
             self::OPTION_NAME,
             __('Remote Media Proxy', 'remote-media-proxy'),
-            [$this, 'renderSettings'],
+            [$this, 'renderDescription'],
             'media'
         );
+        $fields = [
+            'enabled' => [
+                'label' => __('Status', 'remote-media-proxy'),
+                'type' => 'checkbox',
+            ],
+            'url' => [
+                'label' => __('Remote site URL', 'remote-media-proxy'),
+                'type' => 'url',
+                'placeholder' => preg_replace('#^(https?://)#i', '$1example.', home_url()),
+            ],
+            'username' => [
+                'label' => __('Basic Auth username', 'remote-media-proxy'),
+                'type' => 'text',
+                'placeholder' => __('Optional username', 'remote-media-proxy'),
+            ],
+            'password' => [
+                'label' => __('Basic Auth password', 'remote-media-proxy'),
+                'type' => 'password',
+                'placeholder' => __('Optional password', 'remote-media-proxy'),
+            ],
+        ];
+        foreach ($fields as $name => $field) {
+            $id = self::OPTION_NAME . '_' . $name;
+            $args = array_merge($field, ['name' => $name]);
+            if ($name !== 'enabled') {
+                $args['label_for'] = $id;
+            }
+            add_settings_field($id, $field['label'], [$this, 'renderField'], 'media', self::OPTION_NAME, $args);
+        }
     }
 
     public function sanitizeOptions(mixed $input): array
@@ -146,20 +175,34 @@ final class OptionsMedia
             && filter_var($url, FILTER_VALIDATE_URL) !== false;
     }
 
-    public function renderSettings(): void
+    public function renderDescription(): void
     {
-        $options = $this->getOptions();
-        $locked = array_filter(self::CONFIG_CONSTANTS, 'defined');
-        $stored = get_option(self::OPTION_NAME, []);
-        $savedPassword = is_array($stored) ? ($stored['password'] ?? null) : null;
-        $passwordValue = isset($locked['password']) ? '' : PasswordEncryption::decrypt($savedPassword);
-        $fields = [
-            'url' => __('Remote site URL', 'remote-media-proxy'),
-            'username' => __('Basic Auth username', 'remote-media-proxy'),
-            'password' => __('Basic Auth password', 'remote-media-proxy'),
-        ];
         ?>
         <p>
+            <?php
+            esc_html_e(
+                'Load missing media from your source site without copying files locally.',
+                'remote-media-proxy'
+            );
+            ?>
+        </p>
+        <?php
+    }
+
+    public function renderField(array $field): void
+    {
+        $name = $field['name'];
+        $options = $this->getOptions();
+        $constant = self::CONFIG_CONSTANTS[$name];
+        $locked = defined($constant);
+        $value = is_string($options[$name] ?? null) ? $options[$name] : '';
+        if ($name === 'password') {
+            $stored = get_option(self::OPTION_NAME, []);
+            $savedPassword = is_array($stored) ? ($stored['password'] ?? null) : null;
+            $value = $locked ? '' : PasswordEncryption::decrypt($savedPassword);
+        }
+        ?>
+        <?php if ($name === 'enabled') : ?>
             <label for="remote_media_proxy_enabled">
                 <input
                     type="checkbox"
@@ -167,80 +210,43 @@ final class OptionsMedia
                     name="remote_media_proxy[enabled]"
                     value="1"
                     <?php checked($options['enabled']); ?>
-                    <?php disabled(isset($locked['enabled'])); ?>
+                    <?php disabled($locked); ?>
                 >
                 <?php esc_html_e('Enable Remote Media Proxy', 'remote-media-proxy'); ?>
             </label>
-            <?php if (isset($locked['enabled'])) : ?>
-                <span class="description">
-                    <?php
-                    printf(
-                        /* translators: %s: Configuration constant name. */
-                        esc_html__('Configured by %s.', 'remote-media-proxy'),
-                        esc_html($locked['enabled'])
-                    );
-                    ?>
-                </span>
-            <?php endif; ?>
-        </p>
-        <p class="description">
-            <?php
-            esc_html_e(
-                'Fetch missing media without local copies. Apache routing is managed automatically where supported.',
-                'remote-media-proxy'
-            );
-            ?>
-        </p>
-        <?php foreach ($fields as $name => $label) :
-            $value = is_string($options[$name] ?? null) ? $options[$name] : '';
-            if ($name === 'password') {
-                $value = $passwordValue;
-            }
-            ?>
-            <p>
-                <label for="<?php echo esc_attr('remote_media_proxy_' . $name); ?>">
-                    <?php echo esc_html($label); ?>
-                </label><br>
-                <input
-                    class="regular-text"
-                    id="<?php echo esc_attr('remote_media_proxy_' . $name); ?>"
-                    name="<?php echo esc_attr(self::OPTION_NAME . '[' . $name . ']'); ?>"
-                    type="<?php echo esc_attr($name === 'password' ? 'password' : 'text'); ?>"
-                    value="<?php echo esc_attr($value ?? ''); ?>"
-                    autocomplete="off"
-                    <?php disabled(isset($locked[$name])); ?>
-                >
-                <?php if (isset($locked[$name])) : ?>
-                    <span class="description">
-                        <?php
-                        printf(
-                            /* translators: %s: Configuration constant name. */
-                            esc_html__('Configured by %s.', 'remote-media-proxy'),
-                            esc_html($locked[$name])
-                        );
-                        ?>
-                    </span>
-                <?php endif; ?>
-                <?php if ($name === 'password' && $passwordValue === null) : ?>
-                    <span class="description">
-                        <?php
-                        esc_html_e(
-                            'The saved password cannot be read. Re-enter it; saving an empty field removes it.',
-                            'remote-media-proxy'
-                        );
-                        ?>
-                    </span>
-                <?php endif; ?>
+        <?php else : ?>
+            <input
+                class="regular-text"
+                id="<?php echo esc_attr(self::OPTION_NAME . '_' . $name); ?>"
+                name="<?php echo esc_attr(self::OPTION_NAME . '[' . $name . ']'); ?>"
+                type="<?php echo esc_attr($field['type']); ?>"
+                value="<?php echo esc_attr($value ?? ''); ?>"
+                placeholder="<?php echo esc_attr($field['placeholder']); ?>"
+                autocomplete="<?php echo esc_attr($name === 'password' ? 'new-password' : 'off'); ?>"
+                <?php disabled($locked); ?>
+            >
+        <?php endif; ?>
+        <?php if ($locked) : ?>
+            <p class="description">
+                <?php
+                printf(
+                    /* translators: %s: Configuration constant name. */
+                    esc_html__('Configured by %s.', 'remote-media-proxy'),
+                    esc_html($constant)
+                );
+                ?>
             </p>
-        <?php endforeach; ?>
-        <p class="description">
-            <?php
-            esc_html_e(
-                'Passwords are stored encrypted. Clear the password field to remove it.',
-                'remote-media-proxy'
-            );
-            ?>
-        </p>
+        <?php endif; ?>
+        <?php if ($name === 'password' && $value === null) : ?>
+            <p class="description">
+                <?php
+                esc_html_e(
+                    'The saved password cannot be read. Re-enter it; saving an empty field removes it.',
+                    'remote-media-proxy'
+                );
+                ?>
+            </p>
+        <?php endif; ?>
         <?php
     }
 
