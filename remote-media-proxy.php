@@ -6,7 +6,7 @@
  * Description:       Use production media on local and staging WordPress sites without copying the uploads library.
  * Version:           1.0.0
  * Requires at least: 7.0
- * Requires PHP:      8.1
+ * Requires PHP:      8.3
  * Author:            Timo Hubois
  * Author URI:        https://pixelsaft.wtf
  * Text Domain:       remote-media-proxy

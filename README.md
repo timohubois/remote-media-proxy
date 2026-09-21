@@ -55,7 +55,7 @@ Use site-wide configuration and visit the site's admin after code configuration 
 
 ## Development
 
-Use PHP 8.3 for development and CI; keep plugin code compatible with PHP 8.1.
+Use PHP 8.3 for development and CI; keep plugin code compatible with PHP 8.3.
 
 ```sh
 composer install
