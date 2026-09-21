@@ -125,10 +125,8 @@ final class RemoteMediaProxy
 
     public function getMimeType(string $relativePath): ?string
     {
-        $fileType = wp_check_filetype($relativePath, array_merge(wp_get_mime_types(), ['svg' => 'image/svg+xml']));
-        $type = $fileType['type'];
-        return $type && (preg_match('#^(image|audio|video|font)/[a-z0-9.+-]+$#i', $type) || $type === 'application/pdf')
-            ? $type : null;
+        $fileType = wp_check_filetype($relativePath, get_allowed_mime_types());
+        return $fileType['type'] ?: null;
     }
 
     public function isValidPath(string $relativePath): bool
