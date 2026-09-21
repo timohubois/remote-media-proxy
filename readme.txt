@@ -1,7 +1,7 @@
 === Remote Media Proxy ===
 Contributors: timohubois
 Tags: uploads, development, media, proxy
-Requires at least: 7.0.1
+Requires at least: 7.0
 Tested up to: 7.1
 Stable tag: 0.1.0
 Requires PHP: 8.1

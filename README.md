@@ -6,7 +6,7 @@ The plugin extends **Settings > Media** with a remote site URL, optional HTTP Ba
 
 ## Requirements
 
-- WordPress >= 7.0.1 and PHP >= 8.1.
+- WordPress >= 7.0 and PHP >= 8.1.
 - A source site on a different hostname, with matching uploads paths relative to its site base.
 - Missing media requests must reach WordPress. Apache routing is configured automatically where supported; other servers require manual configuration.
 - PHP attachment streams require `allow_url_fopen`.
