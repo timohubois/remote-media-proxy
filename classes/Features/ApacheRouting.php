@@ -7,7 +7,7 @@ defined('ABSPATH') || exit;
 final class ApacheRouting
 {
     private static ?ApacheRouting $instance = null;
-    private bool $failed = false;
+    private static ?string $failure = null;
     private bool $syncing = false;
 
     private function __construct()
@@ -41,18 +41,36 @@ final class ApacheRouting
         $this->syncing = true;
         try {
             self::loadHelpers();
-            $enabled = RemoteMediaProxy::getInstance()->isConfigured();
-            $result = true;
-            if (!$enabled) {
-                $result = self::remove();
-            } elseif (got_mod_rewrite()) {
-                $location = self::location();
-                $rules = $location ? $this->rules($location['path']) : null;
-                $result = $location !== null && $rules !== null
-                    && is_file($location['front']) && self::update($location['file'], $rules);
+            if (!RemoteMediaProxy::getInstance()->isConfigured()) {
+                return self::remove();
             }
-            $this->failed = !$result;
-            return $result;
+            if (!got_mod_rewrite()) {
+                return self::fail(__(
+                    'Remote Media Proxy cannot manage Apache rules. Configure media routing manually if needed.',
+                    'remote-media-proxy'
+                ));
+            }
+            $location = self::location();
+            if ($location === null) {
+                return self::fail(__(
+                    'Remote Media Proxy cannot determine the web root. Check the WordPress home and site URLs.',
+                    'remote-media-proxy'
+                ));
+            }
+            if (!is_file($location['front'])) {
+                return self::fail(__(
+                    'Remote Media Proxy cannot find index.php. Check the WordPress URLs and server document root.',
+                    'remote-media-proxy'
+                ));
+            }
+            $rules = $this->rules($location['path']);
+            if ($rules === null) {
+                return self::fail(__(
+                    'Remote Media Proxy cannot route these uploads. Check site, content and uploads URLs and paths.',
+                    'remote-media-proxy'
+                ));
+            }
+            return self::update($location['file'], $rules);
         } finally {
             $this->syncing = false;
         }
@@ -199,21 +217,23 @@ final class ApacheRouting
     public static function removeOrFail(): void
     {
         if (!self::remove()) {
-            wp_die(esc_html__(
-                'Remote Media Proxy could not clear its .htaccess rules. Check permissions and markers.',
-                'remote-media-proxy'
+            wp_die(esc_html(
+                self::$failure ?? __('Remote Media Proxy could not clear its rules.', 'remote-media-proxy')
             ));
         }
     }
 
     public function notice(): void
     {
-        if ($this->failed && current_user_can('manage_options')) {
-            wp_admin_notice(esc_html__(
-                'Remote Media Proxy routing failed. Check the server layout, .htaccess permissions and markers.',
-                'remote-media-proxy'
-            ), ['type' => 'warning']);
+        if (self::$failure !== null && current_user_can('manage_options')) {
+            wp_admin_notice(esc_html(self::$failure), ['type' => 'warning']);
         }
+    }
+
+    private static function fail(string $reason): bool
+    {
+        self::$failure = $reason;
+        return false;
     }
 
     private static function loadHelpers(): void
@@ -254,18 +274,33 @@ final class ApacheRouting
 
     private static function update(string $file, array $rules): bool
     {
-        if (file_exists($file) && (!is_file($file) || !is_readable($file))) {
-            return false;
+        $contents = '';
+        if (file_exists($file)) {
+            $contents = is_file($file) && is_readable($file) ? file_get_contents($file) : false;
         }
-        $contents = file_exists($file) ? file_get_contents($file) : '';
-        if (!is_string($contents) || ($block = self::block($contents)) === false) {
-            return false;
+        if (!is_string($contents)) {
+            return self::fail(__(
+                'Remote Media Proxy cannot read .htaccess in the content directory. Check its type and permissions.',
+                'remote-media-proxy'
+            ));
         }
-        if ($rules === []) {
-            return $block === [] || extract_from_markers($file, self::marker()) === []
-                || insert_with_markers($file, self::marker(), []);
+        $block = self::block($contents);
+        if ($block === false) {
+            return self::fail(__(
+                'Remote Media Proxy found invalid or duplicate .htaccess markers. Repair its marked block and retry.',
+                'remote-media-proxy'
+            ));
         }
-        return ($block !== [] && extract_from_markers($file, self::marker()) === $rules)
-            || insert_with_markers($file, self::marker(), $rules);
+        $unchanged = $rules === []
+            ? ($block === [] || extract_from_markers($file, self::marker()) === [])
+            : ($block !== [] && extract_from_markers($file, self::marker()) === $rules);
+        if (!$unchanged && !insert_with_markers($file, self::marker(), $rules)) {
+            return self::fail(__(
+                'Remote Media Proxy could not update .htaccess. Check file permissions and available disk space.',
+                'remote-media-proxy'
+            ));
+        }
+        self::$failure = null;
+        return true;
     }
 }
