@@ -58,7 +58,12 @@ final class WordPress
                 return $template;
             }
             status_header(200);
+            // Clear WordPress's 404 cache headers and stale validators before allowing private reuse.
             nocache_headers();
+            header_remove('Expires');
+            header_remove('Pragma');
+            header_remove('ETag');
+            header('Cache-Control: private, max-age=300, stale-while-revalidate=60');
             header('Content-Type: ' . $file->type);
             header('Content-Length: ' . $file->size);
             header('X-Content-Type-Options: nosniff');
