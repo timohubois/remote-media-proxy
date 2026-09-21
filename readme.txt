@@ -12,7 +12,7 @@ Use production media on local and staging WordPress sites without copying the up
 
 == Description ==
 
-Remote Media Proxy lets developers use a cloned WordPress site without copying its production uploads library. Existing local files are served normally. Missing media is retrieved from the configured remote site without saving local media files.
+Remote Media Proxy lets developers use a cloned WordPress site without copying its production uploads library. Existing local files are served normally. Missing media is retrieved from the configured remote site without adding files to the uploads library.
 
 The plugin extends **Settings > Media** with an enable checkbox, a remote site URL and optional HTTP Basic Auth credentials. It is disabled by default and does not depend on the WordPress environment type.
 
@@ -56,17 +56,33 @@ Constant-controlled fields are disabled in Media settings and cannot be changed 
 
 The remote_media_proxy_options filter runs last: saved settings, then defined constants, then the filter. Use site-wide configuration and visit the site's admin after code configuration changes to update Apache routing. Examples are in the GitHub repository.
 
+= Which file types are supported? =
+
+The plugin uses WordPress's allowed MIME types through get_allowed_mime_types(), including the upload_mimes filter and applicable user or Multisite restrictions. It does not maintain a separate file-type allowlist or force SVG support. Additional types such as JSON or fonts must be allowed by WordPress. The remote response must match the detected MIME type or use application/octet-stream.
+
 = Does the plugin download or cache media locally? =
 
-It retrieves media synchronously within the current PHP request and buffers responses in memory, but saves no media files and provides no shared media cache. PHP opens and stat operations can fetch independently. Other plugins or themes may still write their own files.
+Browser requests and compatible PHP readers use the same read-only file access. Existing local files are read directly. Missing files download into private temporary storage. Repeated reads within the same PHP request reuse the download through independent file handles; metadata and failed lookups are also reused. Temporary files are deleted at request shutdown, not when an individual reader closes. Media files are never added to uploads. Neither media bodies nor metadata are cached server-side across requests. Metadata checks do not download file bodies. Other plugins or themes may write their own files.
+
+Successful proxied media responses allow private browser caching for five minutes, followed by up to one minute of stale reuse while supporting browsers refresh in the background. Cached media may remain visible briefly after source settings change or the proxy is disabled. Refreshes transfer the full file. Local files and error responses keep their existing caching behavior.
+
+WordPress chooses the temporary directory, including any WP_TEMP_DIR configuration. It must be writable and outside known web roots, including WordPress and uploads directories. If no suitable directory is available, remote file reads are unavailable and browser requests keep normal missing-file handling. Failed downloads are submitted for deletion immediately. Cleanup uses wp_delete_file(); failed or filtered deletions are retained for another attempt at shutdown. At PHP shutdown, remaining reader handles are closed before temporary files are deleted. If the hosting service kills the PHP process, files may remain for the host or administrator to clean up; the plugin never sweeps the shared temporary directory.
 
 = Does it generate missing image sizes or support image editing? =
 
 No. The source must already serve the requested file or image size. Missing sizes are not generated or replaced with originals. Image editing, resizing and code requiring physical local files are not guaranteed compatible.
 
+= Does it work with Timber and Flynt resizing? =
+
+With Timber and allow_url_fopen enabled, ordinary resize calls can return the correct resized URL even when the local original is missing. This includes native PHP calls, Twig's resize filter and Flynt's resizeDynamic when it wraps Timber resizing. Local originals keep native behavior. No remote availability checks run during URL generation: the exact derivative must exist locally or remotely, otherwise its request returns 404.
+
+For Timber 1 attachment images whose local raster files are missing, valid WordPress attachment dimensions provide width, height and aspect ratio without downloading the image. Stored metadata is not changed. Images without valid attachment dimensions retain native behavior.
+
+The compatibility adapter uses a read-only, metadata-only filesystem view and depends on Timber internals. It has been tested with Timber 1.22.0, 2.3.3 and 2.4.1. There is no version restriction, but compatibility with other releases is not guaranteed. Forced resizing and SVGs retain native behavior; the plugin does not enable Flynt's separate dynamic-generation mode or generate missing files.
+
 = Can PHP read a missing attachment? =
 
-Compatible readers can use the read-only remotemediaproxy:// path returned by get_attached_file(). This requires allow_url_fopen. Obtain the path afresh for each request; do not store it. Existing local files and unfiltered attachment paths remain unchanged. Writes and PHP inclusion are denied; do not enable allow_url_include.
+Compatible readers can use the read-only remotemediaproxy://attachment/ path returned by get_attached_file(). This requires allow_url_fopen. Obtain the path afresh for each request; do not store it. Existing local files and unfiltered attachment paths remain unchanged. Writes and PHP inclusion are denied; do not enable allow_url_include.
 
 = What happens when the source is unavailable? =
 
@@ -76,9 +92,9 @@ Browser requests retain normal local missing-file handling, and virtual attachme
 
 Each remote fetch uses PHP's max_execution_time as its HTTP timeout when that value is positive. When PHP specifies no limit (0), WordPress's normal timeout applies instead: usually 5 seconds, adjustable through http_request_timeout. The plugin does not change PHP's execution limit or calculate remaining execution time; server/FPM deadlines still apply.
 
-The response-size cap comes from wp_max_upload_size(), which follows PHP's upload/post limits and WordPress's upload_size_limit filter. Nonpositive or invalid size limits prevent retrieval. There are no additional plugin settings for these limits.
+The plugin imposes no file-size or per-request download-size cap and does not use the site's upload allowance. Downloads stream to temporary storage rather than being buffered in plugin memory. Large files and concurrent requests can exhaust the hosting account's disk quota; PHP and server execution limits still apply.
 
-Missing browser images have separate requests. PHP attachment reads during rendering share the page request, so their delays and memory use can accumulate. The upload-size policy does not measure available PHP memory; WordPress and buffered files share each request's memory allowance, so large responses can still exhaust it. The plugin is intended for images and modest-sized files, not large video delivery.
+Missing browser images have separate requests. PHP attachment reads during rendering share the page request, so their delays and temporary storage use can accumulate. Consumers that read entire files into strings can still exhaust PHP memory. The plugin is intended for images and modest-sized files, not large video delivery.
 
 = How are protected media and passwords handled? =
 
@@ -102,7 +118,9 @@ No. Use trusted source content and sanitize SVG before inlining it into HTML. Th
 
 The plugin manages its own marked block in WP_CONTENT_DIR/.htaccess, normally wp-content/.htaccess. Uploads must be inside the content directory and its public URL path; custom/CDN layouts may not be supported. On Multisite, the uploads URL must resolve to the correct site.
 
-Routing is reconciled on activation, settings changes and authorized admin visits, not ordinary frontend requests. The plugin does not edit root rules or override server-level static-file handling. Existing files and directories take precedence, but child rules can replace inherited parent rewrites.
+Routing is reconciled on activation, settings changes and authorized admin visits, not ordinary frontend requests. Updates are staged and verified before replacing the rules file. The content directory must be writable and support safe file publication; symlinked .htaccess files are not replaced. Failed staging or publication leaves existing rules intact. The plugin does not edit root rules or override server-level static-file handling. Existing files and directories take precedence, but child rules can replace inherited parent rewrites.
+
+Network-wide routing failures are reported per site. A user-specific notice is retained for up to one minute to survive the activation redirect and removed when shown in Network Admin. These notices are not media or metadata caches.
 
 = What happens when I disable or remove the plugin? =
 
