@@ -7,14 +7,23 @@ use RemoteMediaProxy\Media\VirtualUploads;
 
 defined('ABSPATH') || exit;
 
+/** Adapt browser media requests and native attachment reads to the shared backend. */
 final class WordPress
 {
+    /** Register missing-upload delivery and attachment-path filters. */
     public function __construct()
     {
         add_filter('404_template', [$this, 'proxyUpload']);
         add_filter('get_attached_file', [$this, 'proxyAttachedFile'], 20, 2);
     }
 
+    /**
+     * Substitute a virtual URI only for a supported, missing local attachment.
+     *
+     * @param mixed $file         Attachment path supplied by WordPress or another filter.
+     * @param mixed $attachmentId Attachment identity supplied to the filter.
+     * @return mixed Read-only virtual URI or the unchanged input when proxying is unavailable.
+     */
     public function proxyAttachedFile(mixed $file, mixed $attachmentId): mixed
     {
         if (!is_string($file) || !is_numeric($attachmentId) || !empty($_SERVER['HTTP_X_REMOTE_MEDIA_PROXY'])) {
@@ -23,6 +32,12 @@ final class WordPress
         return VirtualUploads::resolve($file, (int) $attachmentId) ?? $file;
     }
 
+    /**
+     * Deliver a validated missing upload and terminate, or leave native 404 handling unchanged.
+     *
+     * @param string $template WordPress's selected 404 template.
+     * @return string Original template when proxying is rejected or unavailable; success exits the request.
+     */
     public function proxyUpload(string $template): string
     {
         $requestMethod = sanitize_text_field(wp_unslash($_SERVER['REQUEST_METHOD'] ?? ''));

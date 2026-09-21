@@ -4,13 +4,20 @@ namespace RemoteMediaProxy\Features;
 
 defined('ABSPATH') || exit;
 
+/** Inform authorized administrators when remote media proxying is enabled. */
 final class AdminNotice
 {
+    /** Register the administrator-facing status notice. */
     public function __construct()
     {
         add_action('admin_notices', [$this, 'notice']);
     }
 
+    /**
+     * Render the enabled status and settings link without exposing credentials.
+     *
+     * @return void
+     */
     public function notice(): void
     {
         if (!current_user_can('manage_options')) {

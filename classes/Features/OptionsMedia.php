@@ -6,10 +6,13 @@ use RemoteMediaProxy\Helpers\PasswordEncryption;
 
 defined('ABSPATH') || exit;
 
+/** Manage native Media settings, configuration precedence and encrypted saved credentials. */
 final class OptionsMedia
 {
+    /** @var string Site option and settings-section identifier. */
     public const string OPTION_NAME = 'remote_media_proxy';
 
+    /** @var array<string,string> Option fields mapped to their configuration constant names. */
     private const array CONFIG_CONSTANTS = [
         'enabled' => 'REMOTE_MEDIA_PROXY_ENABLED',
         'url' => 'REMOTE_MEDIA_PROXY_URL',
@@ -17,13 +20,20 @@ final class OptionsMedia
         'password' => 'REMOTE_MEDIA_PROXY_PASSWORD',
     ];
 
+    /** @var self|null Shared settings feature for this request. */
     private static ?OptionsMedia $instance = null;
 
+    /** Register native settings initialization for the shared settings feature. */
     private function __construct()
     {
         add_action('admin_init', [$this, 'addSettings']);
     }
 
+    /**
+     * Obtain the request's shared settings feature.
+     *
+     * @return self Shared settings instance.
+     */
     public static function getInstance(): OptionsMedia
     {
         if (!self::$instance instanceof self) {
@@ -32,6 +42,11 @@ final class OptionsMedia
         return self::$instance;
     }
 
+    /**
+     * Apply saved settings, constant overrides and the options filter in that order.
+     *
+     * @return array{enabled:bool,url:mixed,username:mixed,password:mixed,...} Options awaiting field validation.
+     */
     public function getOptions(): array
     {
         $options = get_option(self::OPTION_NAME, []);
@@ -51,6 +66,11 @@ final class OptionsMedia
         return $options;
     }
 
+    /**
+     * Register the Settings API sanitizer and fields on WordPress's Media settings screen.
+     *
+     * @return void
+     */
     public function addSettings(): void
     {
         register_setting('media', self::OPTION_NAME, [
@@ -94,6 +114,12 @@ final class OptionsMedia
         }
     }
 
+    /**
+     * Validate submitted settings without overwriting locked fields or saving unreadable credentials.
+     *
+     * @param mixed $input Submitted settings or an already sanitized value from the Settings API.
+     * @return array<string,mixed> Persistable settings, or unchanged prior settings when encryption fails.
+     */
     public function sanitizeOptions(mixed $input): array
     {
         $input = is_array($input) ? $input : [];
@@ -146,6 +172,17 @@ final class OptionsMedia
         return $options;
     }
 
+    /**
+     * Preserve, remove or encrypt the saved password according to submitted and locked state.
+     *
+     * @param array<string,mixed> $input    Submitted fields after constant-controlled values were removed.
+     * @param mixed               $previous Previously stored password envelope or absent value.
+     * @return mixed Preserved storage, a new ciphertext envelope, or null to remove the credential.
+     * @throws \InvalidArgumentException If a submitted password has an unsupported type.
+     * @throws \RuntimeException If password encryption is unavailable.
+     * @throws \Random\RandomException If secure nonce generation fails.
+     * @throws \SodiumException If password encryption fails.
+     */
     private function sanitizePassword(array $input, mixed $previous): mixed
     {
         if (!defined('REMOTE_MEDIA_PROXY_PASSWORD') && array_key_exists('password', $input)) {
@@ -166,6 +203,12 @@ final class OptionsMedia
         return $previous;
     }
 
+    /**
+     * Require an HTTP(S) source URL without embedded credentials, query strings or unsafe bytes.
+     *
+     * @param string $url Candidate source site URL.
+     * @return boolean Whether the URL satisfies configuration syntax requirements.
+     */
     public function isValidUrl(string $url): bool
     {
         $parts = wp_parse_url($url);
@@ -177,6 +220,11 @@ final class OptionsMedia
             && filter_var($url, FILTER_VALIDATE_URL) !== false;
     }
 
+    /**
+     * Render the translated description of the Media settings section.
+     *
+     * @return void
+     */
     public function renderDescription(): void
     {
         ?>
@@ -191,6 +239,12 @@ final class OptionsMedia
         <?php
     }
 
+    /**
+     * Render an escaped field while protecting code-controlled password values from disclosure.
+     *
+     * @param array{name:string,type:string,placeholder?:string,label?:string,label_for?:string} $field Field data.
+     * @return void
+     */
     public function renderField(array $field): void
     {
         $name = $field['name'];
@@ -252,6 +306,11 @@ final class OptionsMedia
         <?php
     }
 
+    /**
+     * Delete this site's settings without modifying attachments or upload files.
+     *
+     * @return void
+     */
     public static function deleteOptions(): void
     {
         delete_option(self::OPTION_NAME);

@@ -6,20 +6,31 @@ use RemoteMediaProxy\Features\OptionsMedia;
 
 defined('ABSPATH') || exit;
 
+/** Coordinate local-first media access, validated remote requests and request-local reuse. */
 final class RemoteMediaProxy
 {
+    /** @var array<string, array{path: string, size: int, type: string}|null> Request-local downloads and failed GETs. */
     private array $downloads = [];
 
+    /** @var array<string, array{size: int, type: string}|null> Request-local metadata and failed HEADs. */
     private array $metadata = [];
 
+    /** @var self|null Shared backend for the current PHP request. */
     private static ?RemoteMediaProxy $instance = null;
 
+    /** @var boolean Guard against reentrant retrieval through hooks or stream callbacks. */
     private bool $fetching = false;
 
+    /** Keep construction private so request-local caches have a single owner. */
     private function __construct()
     {
     }
 
+    /**
+     * Obtain the request's shared media backend.
+     *
+     * @return self Lazily created backend instance.
+     */
     public static function getInstance(): RemoteMediaProxy
     {
         if (!self::$instance instanceof RemoteMediaProxy) {
@@ -28,6 +39,12 @@ final class RemoteMediaProxy
         return self::$instance;
     }
 
+    /**
+     * Open a local-first reader while retaining shared downloads until request shutdown.
+     *
+     * @param string $relativePath Path relative to the current site's uploads directory.
+     * @return MediaFile|null Independent reader owned by the caller, or null when unavailable.
+     */
     public function openUpload(string $relativePath): ?MediaFile
     {
         $file = $this->fetch($relativePath, false);
@@ -42,11 +59,24 @@ final class RemoteMediaProxy
         return $handle;
     }
 
+    /**
+     * Inspect metadata without downloading a file body. Null means unavailable or rejected.
+     *
+     * @param string $relativePath Path relative to the current site's uploads directory.
+     * @return array{size:int,type:string}|null Validated metadata, or null when unavailable.
+     */
     public function statUpload(string $relativePath): ?array
     {
         return $this->fetch($relativePath, true);
     }
 
+    /**
+     * Guard a metadata lookup or file retrieval against reentrant requests.
+     *
+     * @param string  $relativePath Upload-relative path to validate and resolve.
+     * @param boolean $metadataOnly Whether the caller needs metadata rather than file bytes.
+     * @return array{size:int,type:string,path?:string}|null Validated result; body retrieval includes a local path.
+     */
     private function fetch(string $relativePath, bool $metadataOnly): ?array
     {
         if ($this->fetching) {
@@ -60,6 +90,13 @@ final class RemoteMediaProxy
         }
     }
 
+    /**
+     * Prefer local files, then reuse or fetch media isolated by site, source and credentials.
+     *
+     * @param string  $relativePath Upload-relative path to validate and resolve.
+     * @param boolean $metadataOnly Whether to inspect metadata without downloading a body.
+     * @return array{size:int,type:string,path?:string}|null Validated result, or null when unavailable.
+     */
     private function requestUpload(string $relativePath, bool $metadataOnly): ?array
     {
         if (!$this->isValidPath($relativePath)) {
@@ -129,6 +166,15 @@ final class RemoteMediaProxy
         return $file;
     }
 
+    /**
+     * Successful body downloads remain owned by TemporaryFile until request shutdown.
+     *
+     * @param string               $remoteUrl    Source URL with individually encoded upload path segments.
+     * @param array<string,string> $headers      Source request headers, including configured authentication.
+     * @param string               $mimeType     Expected MIME type allowed by the current WordPress context.
+     * @param boolean              $metadataOnly Whether to send HEAD instead of downloading with GET.
+     * @return array{size:int,type:string,path?:string}|null Validated result, or null on rejection or failure.
+     */
     private function requestRemote(string $remoteUrl, array $headers, string $mimeType, bool $metadataOnly): ?array
     {
         $requestArgs = [
@@ -197,11 +243,21 @@ final class RemoteMediaProxy
         }
     }
 
+    /**
+     * Check local configuration only, without probing the remote source.
+     *
+     * @return boolean Whether enabled, usable configuration exists for a different source hostname.
+     */
     public function isConfigured(): bool
     {
         return $this->getConfiguredOptions() !== null;
     }
 
+    /**
+     * Require enabled settings, readable credentials and a valid, different source hostname.
+     *
+     * @return array{enabled:true,url:string,username:string,password:string,...}|null Usable configuration.
+     */
     private function getConfiguredOptions(): ?array
     {
         $optionsMedia = OptionsMedia::getInstance();
@@ -218,12 +274,24 @@ final class RemoteMediaProxy
         return $options;
     }
 
+    /**
+     * Determine file type using WordPress's current allowed MIME policy.
+     *
+     * @param string $relativePath Upload-relative filename whose extension determines the type.
+     * @return string|null Allowed MIME type, or null for unsupported extensions.
+     */
     public function getMimeType(string $relativePath): ?string
     {
         $fileType = wp_check_filetype($relativePath, get_allowed_mime_types());
         return $fileType['type'] ?: null;
     }
 
+    /**
+     * Reject unsafe paths without sanitizing them into different valid filenames.
+     *
+     * @param string $relativePath Decoded upload-relative path to check.
+     * @return boolean Whether the path contains only permitted segments and bytes.
+     */
     public function isValidPath(string $relativePath): bool
     {
         if (

@@ -4,8 +4,18 @@ namespace RemoteMediaProxy\Helpers;
 
 defined('ABSPATH') || exit;
 
+/** Encrypt saved credentials using authenticated, site-bound keys outside the database. */
 final class PasswordEncryption
 {
+    /**
+     * Encrypt a password with a fresh nonce and the current site's derived key.
+     *
+     * @param string $password Plaintext credential to protect.
+     * @return array{version:1,ciphertext:string} Versioned ciphertext containing its nonce.
+     * @throws \RuntimeException If a usable encryption key is unavailable.
+     * @throws \Random\RandomException If secure nonce generation fails.
+     * @throws \SodiumException If encryption fails.
+     */
     public static function encrypt(string $password): array
     {
         $key = self::key();
@@ -19,7 +29,12 @@ final class PasswordEncryption
         ];
     }
 
-    /** Null indicates unreadable storage; an empty string means no password is saved. */
+    /**
+     * Authenticate and decrypt a saved password without accepting unknown storage formats.
+     *
+     * @param mixed $stored Stored option value, potentially malformed or absent.
+     * @return string|null Plaintext, an empty string for no saved password, or null for unreadable storage.
+     */
     public static function decrypt(mixed $stored): ?string
     {
         if ($stored === null || $stored === '') {
@@ -48,6 +63,11 @@ final class PasswordEncryption
         }
     }
 
+    /**
+     * Derive a site-bound key from WordPress configuration, never database-backed salt fallbacks.
+     *
+     * @return string|null Binary encryption key, or null when prerequisites are unavailable.
+     */
     private static function key(): ?string
     {
         if (!function_exists('sodium_crypto_secretbox') || !function_exists('sodium_crypto_secretbox_open')) {

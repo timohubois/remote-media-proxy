@@ -10,20 +10,36 @@ use WeakMap;
 
 defined('ABSPATH') || exit;
 
+/** Adapt missing-image dimensions and resize URLs without probes, generation or persistent metadata. */
 final class Timber
 {
+    /**
+     * Synthetic file metadata lives only as long as its Resize operation, never across requests.
+     *
+     * @var WeakMap<Resize, array{
+     *     root: string, source: string, sourceUri: string, basedir: string, blog: int,
+     *     paths: array<string, true>, lifetime: object
+     * }>
+     */
     private WeakMap $operations;
-
+    /** @var integer Request-local identifier for synthetic filesystem scopes. */
     private int $sequence = 0;
 
+    /** @var boolean Guard against recursive uploads-directory mapping. */
     private bool $mapping = false;
 
+    /** Defer dependency detection until themes have registered their autoloaders. */
     public function __construct()
     {
         // Themes may register Timber's Composer autoloader after plugins_loaded.
         add_action('after_setup_theme', [$this, 'registerTimberHooks'], PHP_INT_MAX);
     }
 
+    /**
+     * Register the integration once, and only when Timber is available.
+     *
+     * @return void
+     */
     public function registerTimberHooks(): void
     {
         if (isset($this->operations) || !class_exists(\Timber\Timber::class)) {
@@ -38,6 +54,13 @@ final class Timber
         add_filter('timber/image/new_path', [$this, 'prepareFiles'], PHP_INT_MAX);
     }
 
+    /**
+     * Seed Timber 1's in-memory dimensions only while it imports a missing raster attachment.
+     *
+     * @param mixed $metadata     Native attachment metadata supplied through WordPress's filter.
+     * @param mixed $attachmentId Attachment identity used to bind metadata to its original file.
+     * @return mixed Metadata with validated dimensions for Timber's importer, or the unchanged input.
+     */
     public function imageDimensions(mixed $metadata, mixed $attachmentId): mixed
     {
         if (
@@ -80,6 +103,12 @@ final class Timber
         return $metadata;
     }
 
+    /**
+     * Add a metadata-only namespace without granting file reads or image generation.
+     *
+     * @param array<string,mixed> $handlers Existing namespace handler definitions.
+     * @return array<string,mixed> Handler definitions including the scoped Timber stat callback.
+     */
     public function handlers(array $handlers): array
     {
         // No open handler: this namespace must never expose source bytes or allow image generation.
@@ -87,12 +116,24 @@ final class Timber
         return $handlers;
     }
 
+    /**
+     * Allow Timber to recognize the shared virtual URL scheme.
+     *
+     * @param array<int,string> $schemes Schemes already accepted by Timber.
+     * @return array<int,string> Deduplicated schemes including this plugin's protocol.
+     */
     public function schemes(array $schemes): array
     {
         $schemes[] = StreamWrapper::SCHEME;
         return array_unique($schemes);
     }
 
+    /**
+     * Expose synthetic paths only inside eligible missing-source Resize operations.
+     *
+     * @param array<string,mixed> $uploads WordPress uploads-directory information.
+     * @return array<string,mixed> Scoped virtual basedir or unchanged uploads information.
+     */
     public function mapDirectory(array $uploads): array
     {
         if (
@@ -135,6 +176,7 @@ final class Timber
                     'paths' => [],
                     // A weak-map value dies with the Resize object. PHP otherwise retains its last successful stat.
                     'lifetime' => new class {
+                        /** Expire PHP's stat cache when the weakly held Resize operation ends. */
                         public function __destruct()
                         {
                             clearstatcache();
@@ -149,6 +191,12 @@ final class Timber
         }
     }
 
+    /**
+     * Restore physical paths before Flynt and other destination-path filters run.
+     *
+     * @param mixed $path Destination path emitted by Timber's image operation.
+     * @return mixed Physical uploads path within this scope, or the unchanged value.
+     */
     public function physicalPath(mixed $path): mixed
     {
         $call = $this->operation();
@@ -160,6 +208,12 @@ final class Timber
         return $view['basedir'] . substr($path, strlen($view['root']));
     }
 
+    /**
+     * Approve synthetic source and destination metadata after all destination-path filters.
+     *
+     * @param mixed $path Final physical derivative path supplied by the filter chain.
+     * @return mixed Scoped virtual destination or unchanged input for ineligible operations.
+     */
     public function prepareFiles(mixed $path): mixed
     {
         $call = $this->operation();
@@ -189,6 +243,12 @@ final class Timber
         return $uri;
     }
 
+    /**
+     * Report a synthetic cache hit only within the operation that approved the URI.
+     *
+     * @param string $uri Synthetic Timber namespace URI requested by PHP.
+     * @return array{size:1,mtime:0}|null Synthetic metadata, or null outside the approved scope.
+     */
     public function stat(string $uri): ?array
     {
         $call = $this->operation();
@@ -200,6 +260,12 @@ final class Timber
         return ['size' => 1, 'mtime' => 0];
     }
 
+    /**
+     * Require a safe raster-image path accepted by the current WordPress MIME policy.
+     *
+     * @param string $relative Decoded path relative to uploads.
+     * @return boolean Whether the path is eligible for the synthetic filesystem adapter.
+     */
     private function isImage(string $relative): bool
     {
         $proxy = RemoteMediaProxy::getInstance();
@@ -210,6 +276,12 @@ final class Timber
         return $mime !== null && str_starts_with($mime, 'image/') && $mime !== 'image/svg+xml';
     }
 
+    /**
+     * Identify the active non-forced Resize operation through Timber's private call flow.
+     *
+     * @param boolean $pathLookup Whether to additionally require Timber's direct uploads path lookup.
+     * @return array{src:string,op:Resize}|null Source and operation identity, or null outside the supported flow.
+     */
     private function operation(bool $pathLookup = false): ?array
     {
         // Only Timber's direct path lookup within a non-forced Resize may see the synthetic filesystem.

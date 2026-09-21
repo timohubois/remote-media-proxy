@@ -4,12 +4,19 @@ namespace RemoteMediaProxy\Media;
 
 defined('ABSPATH') || exit;
 
+/** Own private request-local downloads and coordinate their shutdown cleanup. */
 final class TemporaryFile
 {
+    /** @var array<string, true> Owned paths, retained until deletion is confirmed. */
     private static array $files = [];
-
+    /** @var boolean Whether the shutdown cleanup callback has been registered. */
     private static bool $registered = false;
 
+    /**
+     * Allocate and verify a private empty file outside known web roots.
+     *
+     * @return string|null Owned file path, or null when allocation is rejected or fails.
+     */
     public static function create(): ?string
     {
         $directory = @realpath(get_temp_dir());
@@ -68,6 +75,12 @@ final class TemporaryFile
         return $file;
     }
 
+    /**
+     * Request deletion of an owned file, retaining failed or filtered attempts for retry.
+     *
+     * @param string $file Exact path previously allocated by this class.
+     * @return void
+     */
     public static function remove(string $file): void
     {
         if (!isset(self::$files[$file])) {
@@ -81,6 +94,11 @@ final class TemporaryFile
         }
     }
 
+    /**
+     * Close all media readers before retrying deletion of this request's remaining files.
+     *
+     * @return void
+     */
     public static function cleanup(): void
     {
         // Windows cannot unlink an open file. Release readers before deleting the request's downloads.

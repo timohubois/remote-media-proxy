@@ -6,14 +6,19 @@ use RemoteMediaProxy\Media\RemoteMediaProxy;
 
 defined('ABSPATH') || exit;
 
+/** Synchronize owned Apache rules during lifecycle and authorized admin operations. */
 final class ApacheRouting
 {
+    /** @var self|null Shared routing coordinator for the current request. */
     private static ?ApacheRouting $instance = null;
 
+    /** @var array<int,string> Site-specific routing failures awaiting reporting. */
     private static array $failures = [];
 
+    /** @var boolean Guard against nested synchronization triggered by settings hooks. */
     private bool $syncing = false;
 
+    /** Register settings, lifecycle and administrator hooks for the shared coordinator. */
     private function __construct()
     {
         add_action('admin_init', [$this, 'adminInit']);
@@ -26,11 +31,21 @@ final class ApacheRouting
         add_action('wp_uninitialize_site', [$this, 'uninitializeSite'], 0);
     }
 
+    /**
+     * Obtain the request's routing coordinator.
+     *
+     * @return self Shared routing instance.
+     */
     public static function getInstance(): ApacheRouting
     {
         return self::$instance ??= new ApacheRouting();
     }
 
+    /**
+     * Reconcile routing only during authorized, non-AJAX administrator visits.
+     *
+     * @return void
+     */
     public function adminInit(): void
     {
         if (!wp_doing_ajax() && current_user_can('manage_options')) {
@@ -38,6 +53,11 @@ final class ApacheRouting
         }
     }
 
+    /**
+     * Reconcile the current site's marked routing block with effective configuration.
+     *
+     * @return boolean Whether routing is synchronized or safely removed.
+     */
     public function sync(): bool
     {
         if ($this->syncing) {
@@ -81,6 +101,11 @@ final class ApacheRouting
         }
     }
 
+    /**
+     * Determine native routing locations using the network's main site when needed.
+     *
+     * @return array{file:string,front:string,path:string}|null Target, front controller and home URL path.
+     */
     private static function location(): ?array
     {
         $switched = is_multisite() && get_current_blog_id() !== get_main_site_id();
@@ -101,6 +126,12 @@ final class ApacheRouting
         }
     }
 
+    /**
+     * Build rules only for supported local uploads layouts belonging to the current site.
+     *
+     * @param string $rootPath Home URL path ending with a slash.
+     * @return list<string>|null Apache directives, or null for unsupported or ambiguous routing.
+     */
     private function rules(string $rootPath): ?array
     {
         $home = wp_parse_url((string) get_option('home'));
@@ -162,6 +193,13 @@ final class ApacheRouting
             'RewriteRule ^ ' . $rootPath . 'index.php [L]', '</IfModule>'];
     }
 
+    /**
+     * Reconcile a site or network and retain per-site failures across activation redirects.
+     *
+     * @param boolean $networkWide Whether to process every site in the current network.
+     * @param boolean $remove      Whether to remove rules instead of applying configuration.
+     * @return void
+     */
     public function syncSites(bool $networkWide = false, bool $remove = false): void
     {
         if (!is_multisite() || !$networkWide) {
@@ -194,6 +232,12 @@ final class ApacheRouting
         }
     }
 
+    /**
+     * Configure a newly initialized site when the plugin is network-active.
+     *
+     * @param \WP_Site $site Site supplied by WordPress's initialization hook.
+     * @return void
+     */
     public function initializeSite(object $site): void
     {
         if (!function_exists('is_plugin_active_for_network')) {
@@ -212,6 +256,12 @@ final class ApacheRouting
         }
     }
 
+    /**
+     * Remove a site's owned routing block before WordPress uninitializes it.
+     *
+     * @param \WP_Site $site Site supplied by WordPress's uninitialization hook.
+     * @return void
+     */
     public function uninitializeSite(object $site): void
     {
         switch_to_blog((int) $site->blog_id);
@@ -222,12 +272,22 @@ final class ApacheRouting
         }
     }
 
+    /**
+     * Clear the current site's owned directives without deleting the shared rules file.
+     *
+     * @return boolean Whether removal succeeded or no directives needed removal.
+     */
     public static function remove(): bool
     {
         self::loadHelpers();
         return self::update(rtrim(WP_CONTENT_DIR, '/\\') . '/.htaccess', []);
     }
 
+    /**
+     * Remove owned rules, terminating the lifecycle operation with an explanation on failure.
+     *
+     * @return void
+     */
     public static function removeOrFail(): void
     {
         if (!self::remove()) {
@@ -238,11 +298,21 @@ final class ApacheRouting
         }
     }
 
+    /**
+     * Isolate redirect-persistent diagnostics by network and administrator.
+     *
+     * @return string Transient key for the current user and network.
+     */
     private static function noticeKey(): string
     {
         return 'remote_media_proxy_routing_' . get_current_network_id() . '_' . get_current_user_id();
     }
 
+    /**
+     * Show authorized administrators relevant failures and consume pending network diagnostics.
+     *
+     * @return void
+     */
     public function notice(): void
     {
         $network = is_network_admin();
@@ -269,6 +339,12 @@ final class ApacheRouting
         }
     }
 
+    /**
+     * Record the current site's failure and emit CLI or explicitly enabled debug diagnostics.
+     *
+     * @param string $reason Controlled, translated failure explanation without credentials.
+     * @return boolean Always false so callers can return the failure directly.
+     */
     private static function fail(string $reason): bool
     {
         self::$failures[get_current_blog_id()] = $reason;
@@ -282,6 +358,11 @@ final class ApacheRouting
         return false;
     }
 
+    /**
+     * Load WordPress routing helpers when unavailable outside administrator requests.
+     *
+     * @return void
+     */
     private static function loadHelpers(): void
     {
         if (!function_exists('extract_from_markers')) {
@@ -292,6 +373,11 @@ final class ApacheRouting
         }
     }
 
+    /**
+     * Identify only the routing block owned by this installation and current site.
+     *
+     * @return string Stable marker incorporating the WordPress root and site ID.
+     */
     private static function marker(): string
     {
         $root = rtrim(wp_normalize_path(realpath(ABSPATH) ?: ABSPATH), '/') . '/';
@@ -299,6 +385,12 @@ final class ApacheRouting
             . ' (site ' . get_current_blog_id() . ')';
     }
 
+    /**
+     * Validate unique, balanced ownership markers before replacing any routing bytes.
+     *
+     * @param string $contents Existing local rules file contents.
+     * @return array{0:string,1:int}|array{}|false Block and offset, an empty array if absent, or false if invalid.
+     */
     private static function block(string $contents): array|false
     {
         $marker = preg_quote(self::marker(), '/');
@@ -317,6 +409,11 @@ final class ApacheRouting
         return $matches[0][0] ?? [];
     }
 
+    /**
+     * Obtain local filesystem operations without replacing the global transport or requesting credentials.
+     *
+     * @return \WP_Filesystem_Direct Local WordPress filesystem instance.
+     */
     private static function filesystem(): \WP_Filesystem_Direct
     {
         require_once ABSPATH . 'wp-admin/includes/class-wp-filesystem-base.php';
@@ -325,6 +422,13 @@ final class ApacheRouting
         return new \WP_Filesystem_Direct(null);
     }
 
+    /**
+     * Replace only the owned marker block while preserving unrelated rules bytes.
+     *
+     * @param string       $file  Local content-directory rules path.
+     * @param list<string> $rules New directives, or an empty list to clear the owned block.
+     * @return boolean Whether the desired rules were already present or safely published.
+     */
     private static function update(string $file, array $rules): bool
     {
         $contents = '';
@@ -366,6 +470,14 @@ final class ApacheRouting
         return true;
     }
 
+    /**
+     * Stage and verify the complete file before publishing, never truncating the live rules file.
+     *
+     * @param string $file     Local rules file to create or replace atomically.
+     * @param string $previous Expected original bytes used to detect concurrent modifications.
+     * @param string $updated  Complete replacement bytes to stage and verify.
+     * @return boolean Whether atomic replacement or exclusive initial publication succeeded.
+     */
     private static function publish(string $file, string $previous, string $updated): bool
     {
         $exists = file_exists($file);

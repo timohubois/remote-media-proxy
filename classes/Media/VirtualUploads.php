@@ -4,10 +4,19 @@ namespace RemoteMediaProxy\Media;
 
 defined('ABSPATH') || exit;
 
+/** Bind virtual upload URIs to native attachment identities and their site context. */
 final class VirtualUploads
 {
+    /** @var boolean Guard against recursive attachment-path resolution. */
     private static bool $resolving = false;
 
+    /**
+     * Resolve a missing native attachment path without probing the source.
+     *
+     * @param string  $file         Candidate physical attachment path.
+     * @param integer $attachmentId Attachment ID in the current site.
+     * @return string|null Canonical virtual URI, or null when the native path should remain unchanged.
+     */
     public static function resolve(string $file, int $attachmentId): ?string
     {
         if (self::$resolving || str_contains($file, '://') || !StreamWrapper::isAvailable()) {
@@ -40,17 +49,36 @@ final class VirtualUploads
         }
     }
 
+    /**
+     * Open an attachment in its own site's context with local-first precedence.
+     *
+     * @param string $uri Canonical attachment namespace URI.
+     * @return MediaFile|null Independent reader owned by the caller, or null on failure.
+     */
     public static function open(string $uri): ?MediaFile
     {
         return self::access($uri, false);
     }
 
+    /**
+     * Inspect attachment size without downloading a remote body.
+     *
+     * @param string $uri Canonical attachment namespace URI.
+     * @return array{size:int}|null Validated size, or null when unavailable.
+     */
     public static function stat(string $uri): ?array
     {
         $metadata = self::access($uri, true);
         return $metadata === null ? null : ['size' => $metadata['size']];
     }
 
+    /**
+     * Resolve the attachment in its own site context and always restore the caller's site afterward.
+     *
+     * @param string  $uri          Attachment namespace URI to validate and resolve.
+     * @param boolean $metadataOnly Whether to inspect size rather than open a reader.
+     * @return MediaFile|array{size:int,type:string}|null The caller owns any returned reader.
+     */
     private static function access(string $uri, bool $metadataOnly): MediaFile|array|null
     {
         if (!preg_match('#^remotemediaproxy://attachment/([1-9][0-9]*)/([1-9][0-9]*)/([^/?\#]+)$#D', $uri, $matches)) {
@@ -91,6 +119,12 @@ final class VirtualUploads
         }
     }
 
+    /**
+     * Require a valid relative path beneath the current site's uploads directory.
+     *
+     * @param string $file Native absolute attachment path.
+     * @return string|null Validated relative path, or null for paths outside the allowed scope.
+     */
     private static function relativePath(string $file): ?string
     {
         $uploads = wp_get_upload_dir();

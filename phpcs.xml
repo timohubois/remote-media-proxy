@@ -16,6 +16,22 @@
     <rule ref="WordPress.WP.I18n">
         <properties><property name="text_domain" type="array"><element value="remote-media-proxy"/></property></properties>
     </rule>
+    <!-- Require complete PHPDoc for application classes, methods and properties. -->
+    <rule ref="Squiz.Commenting.DocCommentAlignment">
+        <include-pattern>*/classes/*</include-pattern>
+    </rule>
+    <rule ref="Squiz.Commenting.ClassComment">
+        <include-pattern>*/classes/*</include-pattern>
+    </rule>
+    <rule ref="Squiz.Commenting.FunctionComment">
+        <include-pattern>*/classes/*</include-pattern>
+        <!-- Squiz's legacy type matcher does not fully understand PHP 8 types and precise PHPDoc types. -->
+        <exclude name="Squiz.Commenting.FunctionComment.IncorrectTypeHint"/>
+        <exclude name="Squiz.Commenting.FunctionComment.InvalidTypeHint"/>
+    </rule>
+    <rule ref="Squiz.Commenting.VariableComment">
+        <include-pattern>*/classes/*</include-pattern>
+    </rule>
     <rule ref="PSR12">
         <!-- WordPress entry guards intentionally accompany class declarations. -->
         <exclude name="PSR1.Files.SideEffects"/>
