@@ -7,7 +7,7 @@ The plugin extends **Settings > Media** with a remote site URL, optional HTTP Ba
 ## Requirements
 
 - WordPress >= 7.0.1 and PHP >= 8.1.
-- An HTTPS source on a different hostname, with matching uploads paths relative to its site base.
+- A source site on a different hostname, with matching uploads paths relative to its site base.
 - Missing media requests must reach WordPress. Apache routing is configured automatically where supported; other servers require manual configuration.
 - PHP attachment streams require `allow_url_fopen`.
 
@@ -22,7 +22,7 @@ Composer is not required to run the plugin.
 
 **Apache:** review existing rewrite rules before enabling. The plugin manages `wp-content/.htaccess`, whose rules can replace inherited parent rules, including security restrictions.
 
-**Protected media:** source Basic Auth does not restrict visitors to the destination site. Protect local and staging sites separately. Saved passwords are encrypted using the existing WordPress authentication keys; keep `wp-config.php` private. After changing those keys or cloning with new keys, re-enter the password.
+**Protected media:** HTTP sends Basic Auth credentials without transport encryption; prefer HTTPS. Source Basic Auth does not restrict visitors to the destination site. Protect local and staging sites separately. Saved passwords are encrypted using the existing WordPress authentication keys; keep `wp-config.php` private. After changing those keys or cloning with new keys, re-enter the password.
 
 The source must already serve the requested files and image sizes. See [readme.txt](readme.txt) for server configuration, request limits, compatibility and security notes.
 

@@ -78,7 +78,7 @@ final class OptionsMedia
             add_settings_error(
                 self::OPTION_NAME,
                 'remote_media_proxy_url',
-                __('Use an HTTPS site URL without credentials, query or fragment.', 'remote-media-proxy')
+                __('Use an HTTP or HTTPS site URL without credentials, query or fragment.', 'remote-media-proxy')
             );
             $url = is_string($previousOptions['url'] ?? null) ? $previousOptions['url'] : '';
         }
@@ -138,7 +138,8 @@ final class OptionsMedia
     public function isValidUrl(string $url): bool
     {
         $parts = wp_parse_url($url);
-        return is_array($parts) && ($parts['scheme'] ?? '') === 'https' && !empty($parts['host'])
+        return is_array($parts) && in_array($parts['scheme'] ?? '', ['http', 'https'], true)
+            && !empty($parts['host'])
             && !isset($parts['user']) && !isset($parts['pass'])
             && !isset($parts['query']) && !isset($parts['fragment'])
             && !preg_match('/[\x00-\x20\x7f\\\\]/', $url)

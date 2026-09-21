@@ -35,7 +35,7 @@ Check out the plugin [GitHub Repository](https://github.com/timohubois/remote-me
 
 1. Upload the 'remote-media-proxy' folder to the /wp-content/plugins/ directory.
 2. Activate **Remote Media Proxy** through **Plugins** in WordPress.
-3. Open **Settings > Media** and enter the remote HTTPS site base URL, not its uploads URL.
+3. Open **Settings > Media** and enter the remote site base URL, not its uploads URL.
 4. Enter Basic Auth credentials if the source requires them.
 5. Check **Enable Remote Media Proxy** and save.
 6. Review your server's rewrite rules and resolve any routing warning shown in the site admin.
@@ -86,7 +86,7 @@ Passwords entered in Media settings are stored using Sodium authenticated encryp
 
 The database-saved password is decrypted and prefilled in a masked password field. Authorized settings users can inspect its value with browser tools. Edit it to replace the saved password, or clear it and save to remove it. Constant-controlled password fields remain blank and disabled. Passwords supplied through constants or filters are used directly, without copying them into database storage or the form.
 
-Basic Auth is optional. A nonempty username enables the Authorization header; an empty password is allowed if the source accepts it. A password without a username does not enable Basic Auth.
+Basic Auth is optional. A nonempty username enables the Authorization header; an empty password is allowed if the source accepts it. HTTP sends credentials without transport encryption; prefer HTTPS. A password without a username does not enable Basic Auth.
 
 Changing AUTH_KEY, AUTH_SALT or the site ID makes saved passwords unreadable; re-enter or remove the password afterward. Unreadable passwords are not sent to the source, and credential-based retrieval fails safely unless code configuration supplies a usable password. Encryption protects against a database-only leak, not access to wp-config.php or PHP execution.
 
