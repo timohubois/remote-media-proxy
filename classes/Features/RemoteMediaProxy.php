@@ -110,7 +110,7 @@ final class RemoteMediaProxy
         $optionsMedia = OptionsMedia::getInstance();
         $options = $optionsMedia->getOptions();
         if (
-            empty($options['enabled']) || !isset($options['url'], $options['username'], $options['password'])
+            !$options['enabled'] || !isset($options['url'], $options['username'], $options['password'])
             || !is_string($options['url']) || !is_string($options['username']) || !is_string($options['password'])
             || !$optionsMedia->isValidUrl($options['url'])
             || strtolower((string) wp_parse_url($options['url'], PHP_URL_HOST))

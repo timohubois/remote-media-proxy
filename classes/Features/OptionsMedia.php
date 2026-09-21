@@ -26,9 +26,7 @@ final class OptionsMedia
     public function getOptions(): array
     {
         $options = apply_filters('remote_media_proxy_options', get_option(self::OPTION_NAME, []));
-        if (!is_array($options)) {
-            return [];
-        }
+        $options = is_array($options) ? $options : [];
         $options = wp_parse_args($options, ['enabled' => false, 'url' => '', 'username' => '', 'password' => '']);
         $options['enabled'] = in_array($options['enabled'], [true, 1, '1'], true);
         return $options;
@@ -52,6 +50,7 @@ final class OptionsMedia
     {
         $input = is_array($input) ? $input : [];
         $previousOptions = get_option(self::OPTION_NAME, []);
+        $previousOptions = is_array($previousOptions) ? $previousOptions : [];
         $url = isset($input['url']) && is_string($input['url']) ? trim($input['url']) : '';
         if ($url !== '' && !$this->isValidUrl($url)) {
             add_settings_error(
@@ -59,7 +58,7 @@ final class OptionsMedia
                 'remote_media_proxy_url',
                 __('Use an HTTPS site URL without credentials, query or fragment.', 'remote-media-proxy')
             );
-            $url = $previousOptions['url'] ?? '';
+            $url = is_string($previousOptions['url'] ?? null) ? $previousOptions['url'] : '';
         }
         $username = isset($input['username']) && is_string($input['username'])
             ? sanitize_text_field($input['username']) : '';
@@ -98,7 +97,7 @@ final class OptionsMedia
                     id="remote_media_proxy_enabled"
                     name="remote_media_proxy[enabled]"
                     value="1"
-                    <?php checked(!empty($options['enabled'])); ?>
+                    <?php checked($options['enabled']); ?>
                 >
                 <?php esc_html_e('Enable Remote Media Proxy', 'remote-media-proxy'); ?>
             </label>
