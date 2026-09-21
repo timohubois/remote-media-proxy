@@ -78,7 +78,6 @@ final class ApacheRouting
         }
     }
 
-    /** Native home path, evaluated on the network's main site rather than a virtual subsite. */
     private static function location(): ?array
     {
         $switched = is_multisite() && get_current_blog_id() !== get_main_site_id();
@@ -244,7 +243,7 @@ final class ApacheRouting
 
     private static function loadHelpers(): void
     {
-        if (!function_exists('insert_with_markers')) {
+        if (!function_exists('extract_from_markers')) {
             require_once ABSPATH . 'wp-admin/includes/misc.php';
         }
         if (!function_exists('get_home_path')) {
@@ -259,7 +258,6 @@ final class ApacheRouting
             . ' (site ' . get_current_blog_id() . ')';
     }
 
-    /** Validate ownership before handing replacement to core's substring-based marker helper. */
     private static function block(string $contents): array|false
     {
         $marker = preg_quote(self::marker(), '/');
@@ -278,11 +276,19 @@ final class ApacheRouting
         return $matches[0][0] ?? [];
     }
 
+    private static function filesystem(): \WP_Filesystem_Direct
+    {
+        require_once ABSPATH . 'wp-admin/includes/class-wp-filesystem-base.php';
+        require_once ABSPATH . 'wp-admin/includes/class-wp-filesystem-direct.php';
+        // Routing operates on local server paths. Do not replace the global transport or request FTP credentials.
+        return new \WP_Filesystem_Direct(null);
+    }
+
     private static function update(string $file, array $rules): bool
     {
         $contents = '';
         if (file_exists($file)) {
-            $contents = is_file($file) && is_readable($file) ? file_get_contents($file) : false;
+            $contents = is_file($file) && is_readable($file) ? self::filesystem()->get_contents($file) : false;
         }
         if (!is_string($contents)) {
             return self::fail(__(
@@ -300,13 +306,113 @@ final class ApacheRouting
         $unchanged = $rules === []
             ? ($block === [] || extract_from_markers($file, self::marker()) === [])
             : ($block !== [] && extract_from_markers($file, self::marker()) === $rules);
-        if (!$unchanged && !insert_with_markers($file, self::marker(), $rules)) {
+        if ($unchanged) {
+            self::$failure = null;
+            return true;
+        }
+        $replacement = '# BEGIN ' . self::marker() . "\n"
+            . ($rules === [] ? '' : implode("\n", $rules) . "\n") . '# END ' . self::marker() . "\n";
+        $updated = $block === []
+            ? $contents . ($contents === '' || str_ends_with($contents, "\n") ? '' : "\n") . $replacement
+            : substr_replace($contents, $replacement, $block[1], strlen($block[0]));
+        if (!self::publish($file, $contents, $updated)) {
             return self::fail(__(
-                'Remote Media Proxy could not update .htaccess. Check file permissions and available disk space.',
+                'Remote Media Proxy could not safely publish .htaccess. Check permissions and disk space, then retry.',
                 'remote-media-proxy'
             ));
         }
         self::$failure = null;
         return true;
+    }
+
+    private static function publish(string $file, string $previous, string $updated): bool
+    {
+        $exists = file_exists($file);
+        if (
+            is_link($file) || (!$exists && $previous !== '')
+            || ($exists && (!is_file($file) || !wp_is_writable($file)))
+        ) {
+            return false;
+        }
+        $filesystem = self::filesystem();
+        // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fopen -- Native handle required for flock() and inode checks.
+        $lock = $exists ? @fopen($file, 'rb') : null;
+        $stage = null;
+        try {
+            if ($exists && (!is_resource($lock) || !@flock($lock, LOCK_EX))) {
+                return false;
+            }
+            $directory = realpath(dirname($file));
+            if ($directory === false || !wp_is_writable($directory)) {
+                return false;
+            }
+            // Same-directory staging is required for atomic publication. Dot-prefixed, initially private.
+            $stage = @tempnam($directory, '.htaccess-rmp-');
+            if ($stage === false) {
+                $stage = null;
+                return false;
+            }
+            if (realpath(dirname($stage)) !== $directory) {
+                return false; // tempnam() may fall back to the system temporary directory.
+            }
+            // The direct transport checks the byte count and closes its handle. Verify the staged bytes too.
+            if (
+                !$filesystem->put_contents($stage, $updated, 0600)
+                || $filesystem->get_contents($stage) !== $updated
+            ) {
+                return false;
+            }
+            $locked = is_resource($lock) ? fstat($lock) : null;
+            if ($exists && !is_array($locked)) {
+                return false;
+            }
+            $staged = @stat($stage);
+            if (!is_array($staged)) {
+                return false;
+            }
+            if ($exists) {
+                if (
+                    ($staged['uid'] !== $locked['uid']
+                        && (!function_exists('chown') || !@$filesystem->chown($stage, $locked['uid'])))
+                    || ($staged['gid'] !== $locked['gid']
+                        && (!function_exists('chgrp') || !@$filesystem->chgrp($stage, $locked['gid'])))
+                ) {
+                    return false;
+                }
+            }
+            $mode = $exists ? ($locked['mode'] & 0777) : 0644;
+            // A zero mode is a default-mode sentinel in WP_Filesystem, not an exact permission value.
+            if ($mode === 0 || !@$filesystem->chmod($stage, $mode)) {
+                return false;
+            }
+            clearstatcache(true, $file);
+            if ($exists) {
+                $current = @stat($file);
+                if (
+                    is_link($file) || !is_array($current) || !is_array($locked)
+                    || $current['ino'] !== $locked['ino'] || $current['dev'] !== $locked['dev']
+                    || $filesystem->get_contents($file) !== $previous
+                ) {
+                    return false;
+                }
+                // phpcs:ignore WordPress.WP.AlternativeFunctions.rename_rename -- Require atomic replacement; WP_Filesystem::move() can fall back to copying.
+                if (!@rename($stage, $file)) {
+                    return false;
+                }
+                $stage = null;
+                return true;
+            }
+            // Exclusive initial publication: do not overwrite a file another request just created.
+            return function_exists('link') && @link($stage, $file);
+        } finally {
+            if ($stage !== null) {
+                wp_delete_file($stage);
+            }
+            if (is_resource($lock)) {
+                flock($lock, LOCK_UN);
+                // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fclose -- Release the native locking handle.
+                fclose($lock);
+            }
+        }
     }
 }
