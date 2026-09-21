@@ -6,14 +6,11 @@ defined('ABSPATH') || exit;
 
 final class VirtualUploads
 {
-    public const SCHEME = 'remotemediaproxy';
-
-    private static bool $registered = false;
     private static bool $resolving = false;
 
     public static function resolve(string $file, int $attachmentId): ?string
     {
-        if (self::$resolving || str_contains($file, '://') || !self::isAvailable()) {
+        if (self::$resolving || str_contains($file, '://') || !StreamWrapper::isAvailable()) {
             return null;
         }
         self::$resolving = true;
@@ -33,20 +30,30 @@ final class VirtualUploads
             if (wp_normalize_path($file) !== wp_normalize_path((string) get_attached_file($attachmentId, true))) {
                 return null;
             }
-            if (!RemoteMediaProxy::getInstance()->isConfigured() || !self::registerWrapper()) {
+            if (!RemoteMediaProxy::getInstance()->isConfigured() || !StreamWrapper::register()) {
                 return null;
             }
-            return self::SCHEME . '://' . get_current_blog_id() . '/' . $attachmentId . '/'
+            return StreamWrapper::SCHEME . '://attachment/' . get_current_blog_id() . '/' . $attachmentId . '/'
                 . rawurlencode(wp_basename($relativePath));
         } finally {
             self::$resolving = false;
         }
     }
 
-    /** Read an attachment in its own site's context, even after switch_to_blog(). */
-    public static function read(string $uri): ?string
+    public static function open(string $uri): ?MediaFile
     {
-        if (!preg_match('#^remotemediaproxy://([1-9][0-9]*)/([1-9][0-9]*)/([^/?\#]+)$#D', $uri, $matches)) {
+        return self::access($uri, false);
+    }
+
+    public static function stat(string $uri): ?array
+    {
+        $metadata = self::access($uri, true);
+        return $metadata === null ? null : ['size' => $metadata['size']];
+    }
+
+    private static function access(string $uri, bool $metadataOnly): MediaFile|array|null
+    {
+        if (!preg_match('#^remotemediaproxy://attachment/([1-9][0-9]*)/([1-9][0-9]*)/([^/?\#]+)$#D', $uri, $matches)) {
             return null;
         }
         $blogId = (int) $matches[1];
@@ -61,35 +68,27 @@ final class VirtualUploads
         try {
             // The unfiltered native path prevents recursion and binds the URI to a real attachment record.
             $file = get_attached_file($attachmentId, true);
-            if (!is_string($file) || self::resolve($file, $attachmentId) !== $uri) {
+            if (!is_string($file) || get_post_type($attachmentId) !== 'attachment') {
                 return null;
             }
             $relativePath = self::relativePath($file);
-            $upload = $relativePath === null ? null : RemoteMediaProxy::getInstance()->fetchUpload($relativePath);
-            return $upload['body'] ?? null;
+            $proxy = RemoteMediaProxy::getInstance();
+            if (
+                $relativePath === null || !$proxy->isConfigured()
+                || !StreamWrapper::isAvailable()
+                || $uri !== StreamWrapper::SCHEME . '://attachment/' . $blogId . '/' . $attachmentId . '/'
+                    . rawurlencode(wp_basename($relativePath))
+            ) {
+                return null;
+            }
+            // A valid existing URI remains usable when its original appears locally after resolution.
+            // The backend enforces MIME policy and local-first access for both reads and metadata.
+            return $metadataOnly ? $proxy->statUpload($relativePath) : $proxy->openUpload($relativePath);
         } finally {
             if ($switched) {
                 restore_current_blog();
             }
         }
-    }
-
-    private static function isAvailable(): bool
-    {
-        return ini_get('allow_url_fopen')
-            && (self::$registered || !in_array(self::SCHEME, stream_get_wrappers(), true));
-    }
-
-    private static function registerWrapper(): bool
-    {
-        // Recheck after extensible metadata/options lookups; never replace a foreign or native wrapper.
-        if (!self::isAvailable()) {
-            return false;
-        }
-        if (!self::$registered) {
-            self::$registered = StreamWrapper::register(self::SCHEME, [self::class, 'read'], STREAM_IS_URL);
-        }
-        return self::$registered;
     }
 
     private static function relativePath(string $file): ?string

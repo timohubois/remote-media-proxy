@@ -4,163 +4,175 @@ namespace RemoteMediaProxy\Media;
 
 defined('ABSPATH') || exit;
 
-// PHP defines these callback names; they are not ordinary application methods.
-// phpcs:disable PSR1.Methods.CamelCapsMethodName.NotCamelCaps
 final class StreamWrapper
 {
-    // PHP's main/php_streams.h defines this flag but does not expose it as a userland constant.
-    private const OPEN_FOR_INCLUDE = 128;
+    public const string SCHEME = 'remotemediaproxy';
 
-    /** @var array<string, callable(string): (string|false|null)> */
-    private static array $readers = [];
+    private static bool $registered = false;
 
-    /** @var resource|null Populated by PHP; cannot override the registered reader. */
+    private static bool $dispatching = false;
+
+    private const int OPEN_FOR_INCLUDE = 128;
+
     public $context;
 
-    private string $body = '';
-    private int $position = 0;
+    private ?MediaFile $file = null;
 
-    /**
-     * Register a read-only data source without replacing an existing protocol handler.
-     *
-     * @param string $scheme Protocol name (at least two characters), normalized to lowercase.
-     * @param callable(string): (string|false|null) $reader Bytes for the URI; false/null means unavailable.
-     * @param int $flags PHP registration flags; pass STREAM_IS_URL for remote sources.
-     */
-    public static function register(string $scheme, callable $reader, int $flags = 0): bool
+    public static function isAvailable(): bool
     {
-        $scheme = strtolower($scheme);
-        if (
-            !preg_match('/^[a-z0-9.+-]{2,}$/D', $scheme)
-            || in_array($scheme, array_map('strtolower', stream_get_wrappers()), true)
-            || !stream_wrapper_register($scheme, self::class, $flags)
-        ) {
+        return ini_get('allow_url_fopen')
+            && (self::$registered || !in_array(self::SCHEME, stream_get_wrappers(), true));
+    }
+
+    public static function register(): bool
+    {
+        // Never replace a foreign or native wrapper, including after extensible options lookups.
+        if (!self::isAvailable()) {
             return false;
         }
-        self::$readers[$scheme] = $reader;
-        return true;
+        if (self::$registered) {
+            return in_array(self::SCHEME, stream_get_wrappers(), true);
+        }
+        return self::$registered = stream_wrapper_register(self::SCHEME, self::class, STREAM_IS_URL);
     }
 
-    private static function read(string $path): ?string
+    private static function handler(string $path, string $operation): ?callable
     {
-        $scheme = strstr($path, '://', true);
-        $reader = $scheme === false ? null : (self::$readers[strtolower($scheme)] ?? null);
-        if ($reader === null) {
+        if (self::$dispatching || !preg_match('#^remotemediaproxy://([a-z][a-z0-9_-]*)/.+$#D', $path, $matches)) {
             return null;
         }
-        $body = $reader($path);
-        return is_string($body) ? $body : null;
+        self::$dispatching = true;
+        try {
+            $handlers = apply_filters('remote_media_proxy_stream_handlers', [
+                'attachment' => [
+                    'open' => VirtualUploads::open(...),
+                    'stat' => VirtualUploads::stat(...),
+                ],
+            ]);
+            $handler = is_array($handlers) ? ($handlers[$matches[1]] ?? null) : null;
+            $callback = is_array($handler) ? ($handler[$operation] ?? null) : null;
+            return is_callable($callback) ? $callback : null;
+        } finally {
+            self::$dispatching = false;
+        }
     }
 
-    public function stream_open(string $path, string $mode, int $options, ?string &$openedPath): bool
-    {
+    public function stream_open( // phpcs:ignore PSR1.Methods.CamelCapsMethodName.NotCamelCaps -- PHP API.
+        string $path,
+        string $mode,
+        int $options,
+        ?string &$openedPath
+    ): bool {
         if (!in_array($mode, ['r', 'rb', 'rt'], true) || ($options & self::OPEN_FOR_INCLUDE)) {
             self::reportFailure((bool) ($options & STREAM_REPORT_ERRORS));
             return false;
         }
-        $body = self::read($path);
-        if ($body === null) {
+        $open = self::handler($path, 'open');
+        $file = $open === null ? null : $open($path);
+        if (!$file instanceof MediaFile) {
             self::reportFailure((bool) ($options & STREAM_REPORT_ERRORS));
             return false;
         }
-        $this->body = $body;
-        $this->position = 0;
+        $this->file = $file;
         if ($options & STREAM_USE_PATH) {
             $openedPath = $path;
         }
         return true;
     }
 
-    public function stream_read(int $count): string
-    {
-        $chunk = substr($this->body, $this->position, $count);
-        $this->position += strlen($chunk);
-        return $chunk;
+    public function stream_read( // phpcs:ignore PSR1.Methods.CamelCapsMethodName.NotCamelCaps -- PHP API.
+        int $count
+    ): string|false {
+        // phpcs:ignore WordPress.WP.AlternativeFunctions.file_system_operations_fread -- PHP requires bounded reads from the existing native handle.
+        return $this->file === null ? false : fread($this->file->stream, $count);
     }
 
-    public function stream_tell(): int
+    public function stream_tell(): int|false // phpcs:ignore PSR1.Methods.CamelCapsMethodName.NotCamelCaps -- PHP API.
     {
-        return $this->position;
+        return $this->file === null ? false : ftell($this->file->stream);
     }
 
-    public function stream_eof(): bool
+    public function stream_eof(): bool // phpcs:ignore PSR1.Methods.CamelCapsMethodName.NotCamelCaps -- PHP API.
     {
-        return $this->position >= strlen($this->body);
+        return $this->file === null || feof($this->file->stream);
     }
 
-    public function stream_seek(int $offset, int $whence = SEEK_SET): bool
-    {
-        $position = match ($whence) {
-            SEEK_SET => $offset,
-            SEEK_CUR => $this->position + $offset,
-            SEEK_END => strlen($this->body) + $offset,
-            default => -1,
-        };
-        if (!is_int($position) || $position < 0) {
-            return false;
-        }
-        $this->position = $position;
-        return true;
+    public function stream_seek( // phpcs:ignore PSR1.Methods.CamelCapsMethodName.NotCamelCaps -- PHP API.
+        int $offset,
+        int $whence = SEEK_SET
+    ): bool {
+        return $this->file !== null && fseek($this->file->stream, $offset, $whence) === 0;
     }
 
-    public function stream_stat(): array
+    public function stream_stat(): array|false // phpcs:ignore PSR1.Methods.CamelCapsMethodName.NotCamelCaps -- PHP API.
     {
-        return self::fileStat($this->body);
+        return $this->file === null ? false : self::fileStat($this->file->size);
     }
 
-    public function url_stat(string $path, int $flags): array|false
-    {
-        $body = self::read($path);
-        if ($body === null) {
+    public function url_stat( // phpcs:ignore PSR1.Methods.CamelCapsMethodName.NotCamelCaps -- PHP API.
+        string $path,
+        int $flags
+    ): array|false {
+        $stat = self::handler($path, 'stat');
+        $metadata = $stat === null ? null : $stat($path);
+        if (
+            !is_array($metadata) || !is_int($metadata['size'] ?? null) || $metadata['size'] < 0
+            || !is_int($metadata['mtime'] ?? 0) || ($metadata['mtime'] ?? 0) < 0
+        ) {
             self::reportFailure(!($flags & STREAM_URL_STAT_QUIET));
             return false;
         }
-        return self::fileStat($body);
+        return self::fileStat($metadata['size'], $metadata['mtime'] ?? 0);
     }
 
     private static function reportFailure(bool $report): void
     {
         if ($report) {
-            // PHP's stream contract requires flag-controlled warnings. Never include request data or credentials.
-            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_trigger_error
+            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_trigger_error -- PHP requires flag-controlled stream warnings; disclose no request data.
             trigger_error('Stream operation failed.', E_USER_WARNING);
         }
     }
 
-    private static function fileStat(string $body): array
+    private static function fileStat(int $size, int $modified = 0): array
     {
         $keys = [
             'dev', 'ino', 'mode', 'nlink', 'uid', 'gid', 'rdev', 'size', 'atime', 'mtime', 'ctime', 'blksize', 'blocks',
         ];
-        $values = [0, 0, 0100444, 1, 0, 0, 0, strlen($body), 0, 0, 0, -1, -1];
+        $values = [0, 0, 0100444, 1, 0, 0, 0, $size, 0, $modified, 0, -1, -1];
         return array_combine($keys, $values) + $values;
     }
 
-    public function stream_close(): void
+    public function stream_close(): void // phpcs:ignore PSR1.Methods.CamelCapsMethodName.NotCamelCaps -- PHP API.
     {
-        $this->body = '';
-        $this->position = 0;
+        $this->file?->close();
+        $this->file = null;
     }
 
-    // PHP passes null for arg2 when changing blocking mode, despite the manual's int synopsis.
-    public function stream_set_option(int $option, int $arg1, ?int $arg2): bool
-    {
-        // No adjustable transport, buffering or blocking options for this in-memory, read-only handle.
+    public function stream_set_option( // phpcs:ignore PSR1.Methods.CamelCapsMethodName.NotCamelCaps -- PHP API.
+        int $option,
+        int $arg1,
+        ?int $arg2
+    ): bool {
         return false;
     }
 
-    public function stream_write(string $data): int
-    {
+    public function stream_write( // phpcs:ignore PSR1.Methods.CamelCapsMethodName.NotCamelCaps -- PHP API.
+        string $data
+    ): int {
         return 0;
     }
 
-    public function stream_truncate(int $size): bool
-    {
+    public function stream_truncate( // phpcs:ignore PSR1.Methods.CamelCapsMethodName.NotCamelCaps -- PHP API.
+        int $size
+    ): bool {
         return false;
     }
 
-    public function stream_metadata(string $path, int $option, mixed $value): bool
-    {
+    public function stream_metadata( // phpcs:ignore PSR1.Methods.CamelCapsMethodName.NotCamelCaps -- PHP API.
+        string $path,
+        int $option,
+        mixed $value
+    ): bool {
         return false;
     }
 

@@ -8,9 +8,17 @@ defined('ABSPATH') || exit;
 
 final class RemoteMediaProxy
 {
+    private array $downloads = [];
+
+    private array $metadata = [];
+
     private static ?RemoteMediaProxy $instance = null;
 
     private bool $fetching = false;
+
+    private function __construct()
+    {
+    }
 
     public static function getInstance(): RemoteMediaProxy
     {
@@ -20,35 +28,63 @@ final class RemoteMediaProxy
         return self::$instance;
     }
 
-    /** Fetch a missing upload relative to the current site's uploads directory. No output or disk writes. */
-    public function fetchUpload(string $relativePath): ?array
+    public function openUpload(string $relativePath): ?MediaFile
     {
-        if ($this->fetching || !empty($_SERVER['HTTP_X_REMOTE_MEDIA_PROXY'])) {
+        $file = $this->fetch($relativePath, false);
+        if ($file === null) {
+            return null;
+        }
+        $handle = MediaFile::open($file['path'], $file['type']);
+        if ($handle !== null && $handle->size !== $file['size']) {
+            $handle->close();
+            return null;
+        }
+        return $handle;
+    }
+
+    public function statUpload(string $relativePath): ?array
+    {
+        return $this->fetch($relativePath, true);
+    }
+
+    private function fetch(string $relativePath, bool $metadataOnly): ?array
+    {
+        if ($this->fetching) {
             return null;
         }
         $this->fetching = true;
         try {
-            return $this->requestUpload($relativePath);
+            return $this->requestUpload($relativePath, $metadataOnly);
         } finally {
             $this->fetching = false;
         }
     }
 
-    private function requestUpload(string $relativePath): ?array
+    private function requestUpload(string $relativePath, bool $metadataOnly): ?array
     {
         if (!$this->isValidPath($relativePath)) {
             return null;
         }
-        $options = $this->getConfiguredOptions();
-        if ($options === null) {
+        $mimeType = $this->getMimeType($relativePath);
+        if ($mimeType === null) {
             return null;
         }
         $uploads = wp_get_upload_dir();
-        if (file_exists($uploads['basedir'] . '/' . $relativePath)) {
+        $local = $uploads['basedir'] . '/' . $relativePath;
+        if (file_exists($local)) {
+            $size = is_file($local) ? filesize($local) : false;
+            if (!is_int($size) || $size < 0) {
+                return null;
+            }
+            return $metadataOnly
+                ? ['size' => $size, 'type' => $mimeType]
+                : ['path' => $local, 'size' => $size, 'type' => $mimeType];
+        }
+        if (!empty($_SERVER['HTTP_X_REMOTE_MEDIA_PROXY'])) {
             return null;
         }
-        $mimeType = $this->getMimeType($relativePath);
-        if ($mimeType === null) {
+        $options = $this->getConfiguredOptions();
+        if ($options === null) {
             return null;
         }
         $uploadsPath = rtrim((string) wp_parse_url($uploads['baseurl'], PHP_URL_PATH), '/');
@@ -57,20 +93,48 @@ final class RemoteMediaProxy
             $uploadsPath = substr($uploadsPath, strlen($homePath));
         }
         $remoteUrl = rtrim($options['url'], '/') . '/' . trim($uploadsPath, '/') . '/'
-            . implode('/', array_map('rawurlencode', explode('/', $relativePath)));
-        $maxResponseSize = wp_max_upload_size();
-        if (!is_int($maxResponseSize) || $maxResponseSize < 1 || $maxResponseSize === PHP_INT_MAX) {
-            return null;
-        }
+            . implode('/', array_map(rawurlencode(...), explode('/', $relativePath)));
         $headers = ['Accept-Encoding' => 'identity', 'X-Remote-Media-Proxy' => '1'];
         if ($options['username'] !== '') {
             $headers['Authorization'] = 'Basic ' . base64_encode($options['username'] . ':' . $options['password']);
         }
+        // Resolve configuration and local precedence before reuse. Never share across sites or credentials.
+        $key = hash('sha256', serialize([get_current_blog_id(), $local, $remoteUrl, $headers, $mimeType]));
+        if (isset($this->downloads[$key])) {
+            $file = $this->downloads[$key];
+            clearstatcache(true, $file['path']);
+            if (!is_file($file['path']) || @filesize($file['path']) !== $file['size']) {
+                // Do not reopen an externally removed or truncated request snapshot.
+                return null;
+            }
+            return $metadataOnly ? ['size' => $file['size'], 'type' => $file['type']] : $file;
+        }
+        if ($metadataOnly && array_key_exists($key, $this->metadata)) {
+            return $this->metadata[$key];
+        }
+        if (!$metadataOnly && array_key_exists($key, $this->downloads)) {
+            return null;
+        }
+        // Negative results are scoped to this operation: a failed HEAD must not prevent a usable GET.
+        if ($metadataOnly) {
+            $this->metadata[$key] = null;
+            return $this->metadata[$key] = $this->requestRemote($remoteUrl, $headers, $mimeType, true);
+        }
+        $this->downloads[$key] = null;
+        $file = $this->requestRemote($remoteUrl, $headers, $mimeType, false);
+        if ($file !== null) {
+            $this->downloads[$key] = $file;
+            $this->metadata[$key] = ['size' => $file['size'], 'type' => $file['type']];
+        }
+        return $file;
+    }
+
+    private function requestRemote(string $remoteUrl, array $headers, string $mimeType, bool $metadataOnly): ?array
+    {
         $requestArgs = [
             'redirection' => 0,
             'sslverify' => true,
             'decompress' => false,
-            'limit_response_size' => $maxResponseSize + 1,
             'headers' => $headers,
         ];
         // Use the host's configured limit as a fetch policy, not a remaining-time estimate.
@@ -78,30 +142,61 @@ final class RemoteMediaProxy
         if ($timeout > 0) {
             $requestArgs['timeout'] = $timeout;
         }
-        $response = wp_safe_remote_get($remoteUrl, $requestArgs);
-        if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+        $temporary = $metadataOnly ? null : TemporaryFile::create();
+        if (!$metadataOnly && $temporary === null) {
             return null;
         }
-        $body = wp_remote_retrieve_body($response);
-        $contentType = wp_remote_retrieve_header($response, 'content-type');
-        $contentLength = wp_remote_retrieve_header($response, 'content-length');
-        $encoding = wp_remote_retrieve_header($response, 'content-encoding');
-        if (!is_string($contentType) || !is_string($contentLength) || !is_string($encoding)) {
-            return null;
+        $complete = false;
+        try {
+            if ($temporary !== null) {
+                $requestArgs['stream'] = true;
+                $requestArgs['filename'] = $temporary;
+            }
+            $response = $metadataOnly
+                ? wp_safe_remote_head($remoteUrl, $requestArgs)
+                : wp_safe_remote_get($remoteUrl, $requestArgs);
+            if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+                return null;
+            }
+            $contentType = wp_remote_retrieve_header($response, 'content-type');
+            $contentLength = wp_remote_retrieve_header($response, 'content-length');
+            $encoding = wp_remote_retrieve_header($response, 'content-encoding');
+            if (!is_string($contentType) || !is_string($contentLength) || !is_string($encoding)) {
+                return null;
+            }
+            $contentType = strtolower(trim(explode(';', $contentType)[0]));
+            if (
+                !in_array($contentType, [$mimeType, 'application/octet-stream'], true)
+                || !in_array($encoding, ['', 'identity'], true)
+            ) {
+                return null;
+            }
+            if ($metadataOnly) {
+                if (
+                    !ctype_digit($contentLength) || (int) $contentLength < 1
+                    || (string) (int) $contentLength !== ltrim($contentLength, '0')
+                ) {
+                    return null;
+                }
+                return ['size' => (int) $contentLength, 'type' => $mimeType];
+            }
+            clearstatcache(true, $temporary);
+            $size = @filesize($temporary);
+            if (
+                !is_int($size) || $size < 1
+                || ($contentLength !== '' && ltrim($contentLength, '0') !== (string) $size)
+            ) {
+                return null;
+            }
+            $complete = true;
+            return ['path' => $temporary, 'size' => $size, 'type' => $mimeType];
+        } finally {
+            if ($temporary !== null && !$complete) {
+                TemporaryFile::remove($temporary);
+            }
         }
-        $contentType = strtolower(trim(explode(';', $contentType)[0]));
-        if (
-            $body === '' || strlen($body) > $maxResponseSize
-            || !in_array($contentType, [$mimeType, 'application/octet-stream'], true)
-            || !in_array($encoding, ['', 'identity'], true)
-            || ($contentLength !== '' && (!ctype_digit($contentLength) || (int) $contentLength !== strlen($body)))
-        ) {
-            return null;
-        }
-        return ['body' => $body, 'type' => $mimeType];
     }
 
-    /** Check local configuration only; never probe the remote while resolving an attachment path. */
     public function isConfigured(): bool
     {
         return $this->getConfiguredOptions() !== null;
