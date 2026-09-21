@@ -2,6 +2,8 @@
 
 namespace RemoteMediaProxy\Features;
 
+use RemoteMediaProxy\Media\RemoteMediaProxy;
+
 defined('ABSPATH') || exit;
 
 final class ApacheRouting

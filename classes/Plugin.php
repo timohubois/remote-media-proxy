@@ -9,24 +9,33 @@ defined('ABSPATH') || exit;
 
 final class Plugin
 {
+    private static bool $initialized = false;
+
     public static function init(): void
     {
+        if (self::$initialized) {
+            return;
+        }
+        self::$initialized = true;
         foreach (['Features', 'Compatibility'] as $directory) {
             self::createInstances($directory);
         }
     }
 
-    private static function createInstances(string $directory): array
+    private static function createInstances(string $directory): void
     {
         $namespace = __NAMESPACE__ . '\\' . $directory;
-        $instances = [];
         foreach (glob(__DIR__ . '/' . $directory . '/*.php') ?: [] as $filename) {
             $className = $namespace . '\\' . basename($filename, '.php');
-            if (class_exists($className)) {
-                $instances[] = is_callable([$className, 'getInstance']) ? $className::getInstance() : new $className();
+            if (!class_exists($className)) {
+                continue;
+            }
+            if (is_callable([$className, 'getInstance'])) {
+                $className::getInstance();
+            } else {
+                new $className();
             }
         }
-        return $instances;
     }
 
     public static function onPluginActivation(bool $networkWide = false): void

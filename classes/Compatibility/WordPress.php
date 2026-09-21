@@ -2,8 +2,8 @@
 
 namespace RemoteMediaProxy\Compatibility;
 
-use RemoteMediaProxy\Features\RemoteMediaProxy;
-use RemoteMediaProxy\Features\VirtualUploads;
+use RemoteMediaProxy\Media\RemoteMediaProxy;
+use RemoteMediaProxy\Media\VirtualUploads;
 
 defined('ABSPATH') || exit;
 

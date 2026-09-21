@@ -1,6 +1,6 @@
 <?php
 
-namespace RemoteMediaProxy\Features;
+namespace RemoteMediaProxy\Media;
 
 defined('ABSPATH') || exit;
 

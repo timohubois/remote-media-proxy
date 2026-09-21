@@ -2,6 +2,8 @@
 
 namespace RemoteMediaProxy\Features;
 
+use RemoteMediaProxy\Helpers\PasswordEncryption;
+
 defined('ABSPATH') || exit;
 
 final class OptionsMedia
@@ -17,7 +19,7 @@ final class OptionsMedia
 
     private static ?OptionsMedia $instance = null;
 
-    public function __construct()
+    private function __construct()
     {
         add_action('admin_init', [$this, 'addSettings']);
     }
