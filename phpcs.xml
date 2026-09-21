@@ -13,6 +13,8 @@
     <rule ref="WordPress.CodeAnalysis"/>
     <rule ref="WordPress.DB"/>
     <rule ref="WordPress.Security"/>
+    <rule ref="WordPress.WP.AlternativeFunctions"/>
+    <rule ref="WordPress.PHP.DevelopmentFunctions"/>
     <rule ref="WordPress.WP.I18n">
         <properties><property name="text_domain" type="array"><element value="remote-media-proxy"/></property></properties>
     </rule>

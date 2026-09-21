@@ -20,3 +20,17 @@ jobs:
           key: ${{ runner.os }}-php-8.3-composer-${{ hashFiles('composer.lock') }}
       - run: composer install --no-interaction --prefer-dist
       - run: composer php:lint
+
+  plugin-check:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build release directory
+        run: |
+          mkdir -p "$RUNNER_TEMP/remote-media-proxy"
+          rsync -a --exclude-from=.distignore ./ "$RUNNER_TEMP/remote-media-proxy/"
+      - uses: wordpress/plugin-check-action@v1
+        with:
+          build-dir: ${{ runner.temp }}/remote-media-proxy
+          slug: remote-media-proxy
+          strict: true
