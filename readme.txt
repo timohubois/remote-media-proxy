@@ -74,7 +74,15 @@ Missing browser images have separate requests. PHP attachment reads during rende
 
 = How are protected media and passwords handled? =
 
-Basic Auth credentials are stored unencrypted. The password is displayed in a masked field that authorized settings users can inspect. Clear it and save to remove it. Client cookies, authorization and query strings are not forwarded to the source.
+Passwords entered in Media settings are stored using Sodium authenticated encryption. The key is derived from the existing AUTH_KEY and AUTH_SALT in wp-config.php and the current site ID. These WordPress keys must be strong strings of at least 32 bytes; no plugin-specific encryption key or setting is required. The plugin uses WordPress's bundled Sodium compatibility layer when needed and never falls back to a database-stored encryption key. Usernames and URLs are not encrypted.
+
+The database-saved password is decrypted and prefilled in a masked password field. Authorized settings users can inspect its value with browser tools. Edit it to replace the saved password, or clear it and save to remove it. Passwords supplied through filters are used directly, without copying them into database storage or the form.
+
+Basic Auth is optional. A nonempty username enables the Authorization header; an empty password is allowed if the source accepts it. A password without a username does not enable Basic Auth.
+
+Changing AUTH_KEY, AUTH_SALT or the site ID makes saved passwords unreadable; re-enter or remove the password afterward. Unreadable passwords are not sent to the source, and credential-based retrieval fails safely unless code configuration supplies a usable password. Encryption protects against a database-only leak, not access to wp-config.php or PHP execution.
+
+If encryption fails, the plugin's settings are left unchanged and an error is shown. Client cookies, authorization and query strings are not forwarded to the source.
 
 **Protect your destination site separately.** Source authentication does not restrict who can view proxied media on your local or staging site.
 

@@ -25,7 +25,12 @@ final class OptionsMedia
 
     public function getOptions(): array
     {
-        $options = apply_filters('remote_media_proxy_options', get_option(self::OPTION_NAME, []));
+        $options = get_option(self::OPTION_NAME, []);
+        $options = is_array($options) ? $options : [];
+        if (array_key_exists('password', $options)) {
+            $options['password'] = PasswordEncryption::decrypt($options['password']);
+        }
+        $options = apply_filters('remote_media_proxy_options', $options);
         $options = is_array($options) ? $options : [];
         $options = wp_parse_args($options, ['enabled' => false, 'url' => '', 'username' => '', 'password' => '']);
         $options['enabled'] = in_array($options['enabled'], [true, 1, '1'], true);
@@ -62,13 +67,45 @@ final class OptionsMedia
         }
         $username = isset($input['username']) && is_string($input['username'])
             ? sanitize_text_field($input['username']) : '';
-        $password = isset($input['password']) && is_string($input['password']) ? $input['password'] : '';
+        try {
+            $password = $this->sanitizePassword($input, $previousOptions['password'] ?? null);
+        } catch (\Throwable) {
+            add_settings_error(
+                self::OPTION_NAME,
+                'remote_media_proxy_password',
+                __(
+                    'Password encryption failed. Check WordPress keys and Sodium; plugin settings were not changed.',
+                    'remote-media-proxy'
+                )
+            );
+            return $previousOptions;
+        }
         return [
             'enabled' => in_array($input['enabled'] ?? false, [true, 1, '1'], true),
             'url' => rtrim($url, '/'),
             'username' => $username,
             'password' => $password,
         ];
+    }
+
+    private function sanitizePassword(array $input, mixed $previous): mixed
+    {
+        if (array_key_exists('password', $input)) {
+            $password = $input['password'];
+            if ($password === '' || $password === null) {
+                return null;
+            }
+            if (is_array($password) && PasswordEncryption::decrypt($password) !== null) {
+                // Core may sanitize an already encrypted result again when adding the option.
+                return ['version' => 1, 'ciphertext' => $password['ciphertext']];
+            }
+            if (!is_string($password)) {
+                throw new \InvalidArgumentException('Invalid password input.');
+            }
+            return $password === PasswordEncryption::decrypt($previous)
+                ? $previous : PasswordEncryption::encrypt($password);
+        }
+        return $previous;
     }
 
     public function isValidUrl(string $url): bool
@@ -84,6 +121,9 @@ final class OptionsMedia
     public function renderSettings(): void
     {
         $options = $this->getOptions();
+        $stored = get_option(self::OPTION_NAME, []);
+        $savedPassword = is_array($stored) ? ($stored['password'] ?? null) : null;
+        $passwordValue = PasswordEncryption::decrypt($savedPassword);
         $fields = [
             'url' => __('Remote site URL', 'remote-media-proxy'),
             'username' => __('Basic Auth username', 'remote-media-proxy'),
@@ -110,7 +150,12 @@ final class OptionsMedia
             );
             ?>
         </p>
-        <?php foreach ($fields as $name => $label) : ?>
+        <?php foreach ($fields as $name => $label) :
+            $value = is_string($options[$name] ?? null) ? $options[$name] : '';
+            if ($name === 'password') {
+                $value = $passwordValue;
+            }
+            ?>
             <p>
                 <label for="<?php echo esc_attr('remote_media_proxy_' . $name); ?>">
                     <?php echo esc_html($label); ?>
@@ -120,15 +165,25 @@ final class OptionsMedia
                     id="<?php echo esc_attr('remote_media_proxy_' . $name); ?>"
                     name="<?php echo esc_attr(self::OPTION_NAME . '[' . $name . ']'); ?>"
                     type="<?php echo esc_attr($name === 'password' ? 'password' : 'text'); ?>"
-                    value="<?php echo esc_attr($options[$name] ?? ''); ?>"
+                    value="<?php echo esc_attr($value ?? ''); ?>"
                     autocomplete="off"
                 >
+                <?php if ($name === 'password' && $passwordValue === null) : ?>
+                    <span class="description">
+                        <?php
+                        esc_html_e(
+                            'The saved password cannot be read. Re-enter it; saving an empty field removes it.',
+                            'remote-media-proxy'
+                        );
+                        ?>
+                    </span>
+                <?php endif; ?>
             </p>
         <?php endforeach; ?>
         <p class="description">
             <?php
             esc_html_e(
-                'Credentials are stored unencrypted. Clear the password field to remove it.',
+                'Passwords are stored encrypted. Clear the password field to remove it.',
                 'remote-media-proxy'
             );
             ?>
