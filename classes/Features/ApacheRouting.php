@@ -9,13 +9,16 @@ defined('ABSPATH') || exit;
 final class ApacheRouting
 {
     private static ?ApacheRouting $instance = null;
-    private static ?string $failure = null;
+
+    private static array $failures = [];
+
     private bool $syncing = false;
 
     private function __construct()
     {
         add_action('admin_init', [$this, 'adminInit']);
         add_action('admin_notices', [$this, 'notice']);
+        add_action('network_admin_notices', [$this, 'notice']);
         add_action('add_option_' . OptionsMedia::OPTION_NAME, [$this, 'sync'], 10, 0);
         add_action('update_option_' . OptionsMedia::OPTION_NAME, [$this, 'sync'], 10, 0);
         add_action('delete_option_' . OptionsMedia::OPTION_NAME, [self::class, 'remove'], 10, 0);
@@ -137,7 +140,7 @@ final class ApacheRouting
             if (defined('DOMAIN_CURRENT_SITE') && defined('PATH_CURRENT_SITE')) {
                 if (
                     PATH_CURRENT_SITE !== '/' && strcasecmp(DOMAIN_CURRENT_SITE, $domain) === 0
-                    && stripos($path, PATH_CURRENT_SITE) === 0
+                    && stripos($path, (string) PATH_CURRENT_SITE) === 0
                 ) {
                     $segments += count(explode('/', trim(PATH_CURRENT_SITE, '/')));
                 }
@@ -179,6 +182,16 @@ final class ApacheRouting
             }
             $offset += 100;
         } while (count($sites) === 100);
+        if (get_current_user_id() === 0) {
+            return;
+        }
+        // Activation redirects before notices render. Keep only short-lived, user-specific routing diagnostics.
+        $key = self::noticeKey();
+        if (self::$failures === []) {
+            delete_transient($key);
+        } else {
+            set_transient($key, self::$failures, MINUTE_IN_SECONDS);
+        }
     }
 
     public function initializeSite(object $site): void
@@ -219,23 +232,51 @@ final class ApacheRouting
     {
         if (!self::remove()) {
             wp_die(esc_html(
-                self::$failure ?? __('Remote Media Proxy could not clear its rules.', 'remote-media-proxy')
+                self::$failures[get_current_blog_id()]
+                    ?? __('Remote Media Proxy could not clear its rules.', 'remote-media-proxy')
             ));
         }
     }
 
+    private static function noticeKey(): string
+    {
+        return 'remote_media_proxy_routing_' . get_current_network_id() . '_' . get_current_user_id();
+    }
+
     public function notice(): void
     {
-        if (self::$failure !== null && current_user_can('manage_options')) {
-            wp_admin_notice(esc_html(self::$failure), ['type' => 'warning']);
+        $network = is_network_admin();
+        if (!current_user_can($network ? 'manage_network_options' : 'manage_options')) {
+            return;
+        }
+        $failures = self::$failures;
+        if ($network) {
+            $pending = get_transient(self::noticeKey());
+            delete_transient(self::noticeKey());
+            $failures = array_replace(is_array($pending) ? $pending : [], $failures);
+        }
+        foreach ($failures as $siteId => $reason) {
+            if (!is_string($reason) || (!$network && (int) $siteId !== get_current_blog_id())) {
+                continue;
+            }
+            $message = $network ? sprintf(
+                /* translators: 1: Site ID, 2: Routing failure description. */
+                __('Site %1$d: %2$s', 'remote-media-proxy'),
+                (int) $siteId,
+                $reason
+            ) : $reason;
+            wp_admin_notice(esc_html($message), ['type' => 'warning']);
         }
     }
 
     private static function fail(string $reason): bool
     {
-        self::$failure = $reason;
+        self::$failures[get_current_blog_id()] = $reason;
+        if (defined('WP_CLI') && WP_CLI) {
+            \WP_CLI::warning('Remote Media Proxy (site ' . get_current_blog_id() . '): ' . $reason);
+        }
         if (defined('WP_DEBUG') && WP_DEBUG && defined('WP_DEBUG_LOG') && WP_DEBUG_LOG) {
-            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Log routing failures only when debug logging is enabled.
+            // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_error_log -- Diagnostics require WP_DEBUG and WP_DEBUG_LOG; no credentials or request data.
             error_log('Remote Media Proxy (site ' . get_current_blog_id() . '): ' . sanitize_text_field($reason));
         }
         return false;
@@ -307,7 +348,7 @@ final class ApacheRouting
             ? ($block === [] || extract_from_markers($file, self::marker()) === [])
             : ($block !== [] && extract_from_markers($file, self::marker()) === $rules);
         if ($unchanged) {
-            self::$failure = null;
+            unset(self::$failures[get_current_blog_id()]);
             return true;
         }
         $replacement = '# BEGIN ' . self::marker() . "\n"
@@ -321,7 +362,7 @@ final class ApacheRouting
                 'remote-media-proxy'
             ));
         }
-        self::$failure = null;
+        unset(self::$failures[get_current_blog_id()]);
         return true;
     }
 
