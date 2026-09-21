@@ -28,17 +28,30 @@ The source must already serve the requested files and image sizes. See [readme.t
 
 ## Configuration in code
 
-Override saved settings through `remote_media_proxy_options`:
+Set any of these constants in `wp-config.php`, before WordPress loads:
+
+```php
+define('REMOTE_MEDIA_PROXY_ENABLED', true);
+define('REMOTE_MEDIA_PROXY_URL', 'https://production.example');
+define('REMOTE_MEDIA_PROXY_USERNAME', 'example-user');
+define('REMOTE_MEDIA_PROXY_PASSWORD', 'example-password');
+```
+
+Define only the values you want to control in code. Their Media settings fields are disabled, and code-supplied passwords are not copied into saved settings. Database-saved passwords are prefilled in a masked field; edit to replace or clear to remove. Constants and filters never supply the form's password value. Constants and filters remain optional; Media settings work without plugin-specific constants. Use empty strings for credentials when Basic Auth is not needed.
+
+Precedence: **saved settings → defined constants → filter**. Defined `false` and empty strings override saved values too. The filter can override all four options:
 
 ```php
 add_filter('remote_media_proxy_options', static function (array $options): array {
     $options['enabled'] = true;
     $options['url'] = 'https://production.example';
+    $options['username'] = 'example-user';
+    $options['password'] = 'example-password';
     return $options;
 });
 ```
 
-Use site-wide configuration and visit the site's admin after filter-only changes to update Apache routing.
+Use site-wide configuration and visit the site's admin after code configuration changes to update Apache routing.
 
 ## Development
 

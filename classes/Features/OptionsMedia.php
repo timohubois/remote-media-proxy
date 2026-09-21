@@ -8,6 +8,13 @@ final class OptionsMedia
 {
     public const OPTION_NAME = 'remote_media_proxy';
 
+    private const CONFIG_CONSTANTS = [
+        'enabled' => 'REMOTE_MEDIA_PROXY_ENABLED',
+        'url' => 'REMOTE_MEDIA_PROXY_URL',
+        'username' => 'REMOTE_MEDIA_PROXY_USERNAME',
+        'password' => 'REMOTE_MEDIA_PROXY_PASSWORD',
+    ];
+
     private static ?OptionsMedia $instance = null;
 
     public function __construct()
@@ -27,8 +34,13 @@ final class OptionsMedia
     {
         $options = get_option(self::OPTION_NAME, []);
         $options = is_array($options) ? $options : [];
-        if (array_key_exists('password', $options)) {
+        if (!defined('REMOTE_MEDIA_PROXY_PASSWORD') && array_key_exists('password', $options)) {
             $options['password'] = PasswordEncryption::decrypt($options['password']);
+        }
+        foreach (self::CONFIG_CONSTANTS as $name => $constant) {
+            if (defined($constant)) {
+                $options[$name] = constant($constant);
+            }
         }
         $options = apply_filters('remote_media_proxy_options', $options);
         $options = is_array($options) ? $options : [];
@@ -56,6 +68,11 @@ final class OptionsMedia
         $input = is_array($input) ? $input : [];
         $previousOptions = get_option(self::OPTION_NAME, []);
         $previousOptions = is_array($previousOptions) ? $previousOptions : [];
+        foreach (self::CONFIG_CONSTANTS as $name => $constant) {
+            if (defined($constant)) {
+                unset($input[$name]); // Ignore locked fields even in a crafted form submission.
+            }
+        }
         $url = isset($input['url']) && is_string($input['url']) ? trim($input['url']) : '';
         if ($url !== '' && !$this->isValidUrl($url)) {
             add_settings_error(
@@ -80,17 +97,27 @@ final class OptionsMedia
             );
             return $previousOptions;
         }
-        return [
+        $options = [
             'enabled' => in_array($input['enabled'] ?? false, [true, 1, '1'], true),
             'url' => rtrim($url, '/'),
             'username' => $username,
             'password' => $password,
         ];
+        foreach (self::CONFIG_CONSTANTS as $name => $constant) {
+            if (defined($constant)) {
+                if (!array_key_exists($name, $previousOptions)) {
+                    unset($options[$name]);
+                } elseif ($name !== 'password') {
+                    $options[$name] = $previousOptions[$name];
+                }
+            }
+        }
+        return $options;
     }
 
     private function sanitizePassword(array $input, mixed $previous): mixed
     {
-        if (array_key_exists('password', $input)) {
+        if (!defined('REMOTE_MEDIA_PROXY_PASSWORD') && array_key_exists('password', $input)) {
             $password = $input['password'];
             if ($password === '' || $password === null) {
                 return null;
@@ -121,9 +148,10 @@ final class OptionsMedia
     public function renderSettings(): void
     {
         $options = $this->getOptions();
+        $locked = array_filter(self::CONFIG_CONSTANTS, 'defined');
         $stored = get_option(self::OPTION_NAME, []);
         $savedPassword = is_array($stored) ? ($stored['password'] ?? null) : null;
-        $passwordValue = PasswordEncryption::decrypt($savedPassword);
+        $passwordValue = isset($locked['password']) ? '' : PasswordEncryption::decrypt($savedPassword);
         $fields = [
             'url' => __('Remote site URL', 'remote-media-proxy'),
             'username' => __('Basic Auth username', 'remote-media-proxy'),
@@ -138,9 +166,21 @@ final class OptionsMedia
                     name="remote_media_proxy[enabled]"
                     value="1"
                     <?php checked($options['enabled']); ?>
+                    <?php disabled(isset($locked['enabled'])); ?>
                 >
                 <?php esc_html_e('Enable Remote Media Proxy', 'remote-media-proxy'); ?>
             </label>
+            <?php if (isset($locked['enabled'])) : ?>
+                <span class="description">
+                    <?php
+                    printf(
+                        /* translators: %s: Configuration constant name. */
+                        esc_html__('Configured by %s.', 'remote-media-proxy'),
+                        esc_html($locked['enabled'])
+                    );
+                    ?>
+                </span>
+            <?php endif; ?>
         </p>
         <p class="description">
             <?php
@@ -167,7 +207,19 @@ final class OptionsMedia
                     type="<?php echo esc_attr($name === 'password' ? 'password' : 'text'); ?>"
                     value="<?php echo esc_attr($value ?? ''); ?>"
                     autocomplete="off"
+                    <?php disabled(isset($locked[$name])); ?>
                 >
+                <?php if (isset($locked[$name])) : ?>
+                    <span class="description">
+                        <?php
+                        printf(
+                            /* translators: %s: Configuration constant name. */
+                            esc_html__('Configured by %s.', 'remote-media-proxy'),
+                            esc_html($locked[$name])
+                        );
+                        ?>
+                    </span>
+                <?php endif; ?>
                 <?php if ($name === 'password' && $passwordValue === null) : ?>
                     <span class="description">
                         <?php

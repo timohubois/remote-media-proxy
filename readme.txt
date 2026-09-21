@@ -21,7 +21,7 @@ The plugin extends **Settings > Media** with an enable checkbox, a remote site U
 * Use production media on local and staging sites without copying or syncing uploads.
 * Serve existing local files first.
 * Support compatible PHP attachment readers through read-only streams.
-* Configure the source and optional Basic Auth in native WordPress Media settings.
+* Configure the source and optional Basic Auth in native WordPress Media settings or wp-config.php.
 * Automatically configure missing-upload routing on supported Apache layouts.
 * Support single-site and Multisite without requiring a particular theme or source-side helper.
 
@@ -47,6 +47,14 @@ The source must use a different hostname and matching uploads paths relative to 
 On nginx, Caddy or unsupported Apache layouts, configure missing media requests to reach WordPress's normal front controller rather than a static 404. Preserve script-execution restrictions in uploads.
 
 == Frequently Asked Questions ==
+
+= Can I configure the plugin in wp-config.php? =
+
+Yes. Define any of REMOTE_MEDIA_PROXY_ENABLED, REMOTE_MEDIA_PROXY_URL, REMOTE_MEDIA_PROXY_USERNAME and REMOTE_MEDIA_PROXY_PASSWORD before WordPress loads. Use a boolean for ENABLED and strings for the other values. Only defined constants override saved settings; false and empty strings are intentional overrides.
+
+Constant-controlled fields are disabled in Media settings and cannot be changed through form submissions. URL, username and enablement are shown; constant-controlled password fields stay blank. Code-supplied passwords are not copied into saved settings. Existing saved credentials are retained and take effect again if their constants are removed, provided the WordPress encryption keys have not changed.
+
+The remote_media_proxy_options filter runs last: saved settings, then defined constants, then the filter. Use site-wide configuration and visit the site's admin after code configuration changes to update Apache routing. Examples are in the GitHub repository.
 
 = Does the plugin download or cache media locally? =
 
@@ -76,7 +84,7 @@ Missing browser images have separate requests. PHP attachment reads during rende
 
 Passwords entered in Media settings are stored using Sodium authenticated encryption. The key is derived from the existing AUTH_KEY and AUTH_SALT in wp-config.php and the current site ID. These WordPress keys must be strong strings of at least 32 bytes; no plugin-specific encryption key or setting is required. The plugin uses WordPress's bundled Sodium compatibility layer when needed and never falls back to a database-stored encryption key. Usernames and URLs are not encrypted.
 
-The database-saved password is decrypted and prefilled in a masked password field. Authorized settings users can inspect its value with browser tools. Edit it to replace the saved password, or clear it and save to remove it. Passwords supplied through filters are used directly, without copying them into database storage or the form.
+The database-saved password is decrypted and prefilled in a masked password field. Authorized settings users can inspect its value with browser tools. Edit it to replace the saved password, or clear it and save to remove it. Constant-controlled password fields remain blank and disabled. Passwords supplied through constants or filters are used directly, without copying them into database storage or the form.
 
 Basic Auth is optional. A nonempty username enables the Authorization header; an empty password is allowed if the source accepts it. A password without a username does not enable Basic Auth.
 
