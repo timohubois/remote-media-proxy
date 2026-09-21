@@ -11,41 +11,30 @@ final class VirtualUploads
     private static bool $registered = false;
     private static bool $resolving = false;
 
-    public function __construct()
+    public static function resolve(string $file, int $attachmentId): ?string
     {
-        if (self::isAvailable()) {
-            add_filter('get_attached_file', [self::class, 'getAttachedFile'], 20, 2);
-        }
-    }
-
-    public static function getAttachedFile(mixed $file, mixed $attachmentId): mixed
-    {
-        if (
-            self::$resolving || !is_numeric($attachmentId) || !is_string($file) || str_contains($file, '://')
-            || !empty($_SERVER['HTTP_X_REMOTE_MEDIA_PROXY']) || !self::isAvailable()
-        ) {
-            return $file;
+        if (self::$resolving || str_contains($file, '://') || !self::isAvailable()) {
+            return null;
         }
         self::$resolving = true;
         try {
             if (file_exists($file)) {
-                return $file;
+                return null;
             }
             $relativePath = self::relativePath($file);
-            $attachmentId = (int) $attachmentId;
             if (
                 $attachmentId < 1 || $relativePath === null
                 || get_post_type($attachmentId) !== 'attachment'
                 || RemoteMediaProxy::getInstance()->getMimeType($relativePath) === null
             ) {
-                return $file;
+                return null;
             }
-            // Preserve another filter's path mapping; our identity resolves only native attachment metadata.
+            // Bind the virtual identity to native attachment metadata, never to an alternate path.
             if (wp_normalize_path($file) !== wp_normalize_path((string) get_attached_file($attachmentId, true))) {
-                return $file;
+                return null;
             }
             if (!RemoteMediaProxy::getInstance()->isConfigured() || !self::registerWrapper()) {
-                return $file;
+                return null;
             }
             return self::SCHEME . '://' . get_current_blog_id() . '/' . $attachmentId . '/'
                 . rawurlencode(wp_basename($relativePath));
@@ -72,7 +61,7 @@ final class VirtualUploads
         try {
             // The unfiltered native path prevents recursion and binds the URI to a real attachment record.
             $file = get_attached_file($attachmentId, true);
-            if (self::getAttachedFile($file, $attachmentId) !== $uri) {
+            if (!is_string($file) || self::resolve($file, $attachmentId) !== $uri) {
                 return null;
             }
             $relativePath = self::relativePath($file);
@@ -103,11 +92,8 @@ final class VirtualUploads
         return self::$registered;
     }
 
-    private static function relativePath(mixed $file): ?string
+    private static function relativePath(string $file): ?string
     {
-        if (!is_string($file)) {
-            return null;
-        }
         $uploads = wp_get_upload_dir();
         $base = rtrim(wp_normalize_path($uploads['basedir']), '/') . '/';
         $file = wp_normalize_path($file);

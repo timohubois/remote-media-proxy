@@ -3,6 +3,7 @@
 namespace RemoteMediaProxy\Compatibility;
 
 use RemoteMediaProxy\Features\RemoteMediaProxy;
+use RemoteMediaProxy\Features\VirtualUploads;
 
 defined('ABSPATH') || exit;
 
@@ -11,6 +12,15 @@ final class WordPress
     public function __construct()
     {
         add_filter('404_template', [$this, 'proxyUpload']);
+        add_filter('get_attached_file', [$this, 'proxyAttachedFile'], 20, 2);
+    }
+
+    public function proxyAttachedFile(mixed $file, mixed $attachmentId): mixed
+    {
+        if (!is_string($file) || !is_numeric($attachmentId) || !empty($_SERVER['HTTP_X_REMOTE_MEDIA_PROXY'])) {
+            return $file;
+        }
+        return VirtualUploads::resolve($file, (int) $attachmentId) ?? $file;
     }
 
     public function proxyUpload(string $template): string
