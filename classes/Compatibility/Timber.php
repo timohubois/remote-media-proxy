@@ -1,0 +1,242 @@
+<?php
+
+namespace RemoteMediaProxy\Compatibility;
+
+use RemoteMediaProxy\Media\StreamWrapper;
+use RemoteMediaProxy\Media\RemoteMediaProxy;
+use Timber\Image\Operation\Resize;
+use Timber\ImageHelper;
+use WeakMap;
+
+defined('ABSPATH') || exit;
+
+final class Timber
+{
+    private WeakMap $operations;
+
+    private int $sequence = 0;
+
+    private bool $mapping = false;
+
+    public function __construct()
+    {
+        // Themes may register Timber's Composer autoloader after plugins_loaded.
+        add_action('after_setup_theme', [$this, 'registerTimberHooks'], PHP_INT_MAX);
+    }
+
+    public function registerTimberHooks(): void
+    {
+        if (isset($this->operations) || !class_exists(\Timber\Timber::class)) {
+            return;
+        }
+        $this->operations = new WeakMap();
+        add_filter('wp_get_attachment_metadata', [$this, 'imageDimensions'], 10, 2);
+        add_filter('remote_media_proxy_stream_handlers', [$this, 'handlers']);
+        add_filter('upload_dir', [$this, 'mapDirectory'], PHP_INT_MAX);
+        add_filter('timber/url/schemes-whitelist', [$this, 'schemes']);
+        add_filter('timber/image/new_path', [$this, 'physicalPath'], PHP_INT_MIN);
+        add_filter('timber/image/new_path', [$this, 'prepareFiles'], PHP_INT_MAX);
+    }
+
+    public function imageDimensions(mixed $metadata, mixed $attachmentId): mixed
+    {
+        if (
+            !is_array($metadata) || !is_int($attachmentId) || $attachmentId <= 0
+            || !is_string($metadata['file'] ?? null) || !$this->isImage($metadata['file'])
+            || isset($metadata['_dimensions']) || !empty($_SERVER['HTTP_X_REMOTE_MEDIA_PROXY'])
+        ) {
+            return $metadata;
+        }
+        $width = $metadata['width'] ?? null;
+        $height = $metadata['height'] ?? null;
+        if ((!is_int($width) && !is_string($width)) || (!is_int($height) && !is_string($height))) {
+            return $metadata;
+        }
+        $width = filter_var($width, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+        $height = filter_var($height, FILTER_VALIDATE_INT, ['options' => ['min_range' => 1]]);
+        if ($width === false || $height === false) {
+            return $metadata;
+        }
+        // Only Timber 1's image constructor imports this private field. Ordinary metadata stays unchanged.
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_debug_backtrace -- Scope metadata to Timber's importer; never log the trace.
+        $frames = debug_backtrace(DEBUG_BACKTRACE_IGNORE_ARGS, 6);
+        $caller = $frames[4] ?? [];
+        if (
+            ($caller['class'] ?? null) !== 'Timber\\Image' || ($caller['function'] ?? null) !== 'get_image_info'
+            || !property_exists('Timber\\Image', '_dimensions')
+            || !RemoteMediaProxy::getInstance()->isConfigured()
+            || get_post_meta($attachmentId, '_wp_attached_file', true) !== $metadata['file']
+        ) {
+            return $metadata;
+        }
+        $uploads = wp_get_upload_dir();
+        if (!is_string($uploads['basedir'] ?? null) || str_contains($uploads['basedir'], '://')) {
+            return $metadata;
+        }
+        if (!file_exists($uploads['basedir'] . '/' . $metadata['file'])) {
+            // Core::import() seeds the image object's existing in-memory dimension cache.
+            $metadata['_dimensions'] = [$width, $height];
+        }
+        return $metadata;
+    }
+
+    public function handlers(array $handlers): array
+    {
+        // No open handler: this namespace must never expose source bytes or allow image generation.
+        $handlers['timber'] = ['stat' => $this->stat(...)];
+        return $handlers;
+    }
+
+    public function schemes(array $schemes): array
+    {
+        $schemes[] = StreamWrapper::SCHEME;
+        return array_unique($schemes);
+    }
+
+    public function mapDirectory(array $uploads): array
+    {
+        if (
+            $this->mapping || !class_exists(ImageHelper::class, false) || !ini_get('allow_url_fopen')
+            || !empty($_SERVER['HTTP_X_REMOTE_MEDIA_PROXY'])
+        ) {
+            return $uploads;
+        }
+        $call = $this->operation(true);
+        if ($call === null || !is_string($uploads['basedir'] ?? null) || !is_string($uploads['baseurl'] ?? null)) {
+            return $uploads;
+        }
+        $this->mapping = true;
+        try {
+            $base = rtrim($uploads['baseurl'], '/') . '/';
+            $source = $call['src'];
+            if (str_starts_with($source, '/') && !str_starts_with($source, '//')) {
+                $base = (string) wp_parse_url($base, PHP_URL_PATH);
+            }
+            $relative = $base !== '' && str_starts_with($source, $base) ? substr($source, strlen($base)) : '';
+            $decoded = rawurldecode($relative);
+            if (
+                str_contains($uploads['basedir'], '://') || !$this->isImage($decoded)
+                || file_exists($uploads['basedir'] . '/' . $decoded)
+                || !RemoteMediaProxy::getInstance()->isConfigured()
+            ) {
+                return $uploads;
+            }
+            if (!StreamWrapper::register()) {
+                return $uploads;
+            }
+            if (!isset($this->operations[$call['op']])) {
+                $root = StreamWrapper::SCHEME . '://timber/' . ++$this->sequence;
+                $this->operations[$call['op']] = [
+                    'root' => $root,
+                    'source' => $decoded,
+                    'sourceUri' => $root . '/' . $relative,
+                    'basedir' => rtrim(wp_normalize_path($uploads['basedir']), '/'),
+                    'blog' => get_current_blog_id(),
+                    'paths' => [],
+                    // A weak-map value dies with the Resize object. PHP otherwise retains its last successful stat.
+                    'lifetime' => new class {
+                        public function __destruct()
+                        {
+                            clearstatcache();
+                        }
+                    },
+                ];
+            }
+            $uploads['basedir'] = $this->operations[$call['op']]['root'];
+            return $uploads;
+        } finally {
+            $this->mapping = false;
+        }
+    }
+
+    public function physicalPath(mixed $path): mixed
+    {
+        $call = $this->operation();
+        $view = $call === null ? null : ($this->operations[$call['op']] ?? null);
+        if ($view === null || !is_string($path) || !str_starts_with($path, $view['root'] . '/')) {
+            return $path;
+        }
+        // Flynt and other path filters must receive ordinary physical paths before we remap the result.
+        return $view['basedir'] . substr($path, strlen($view['root']));
+    }
+
+    public function prepareFiles(mixed $path): mixed
+    {
+        $call = $this->operation();
+        $view = $call === null ? null : ($this->operations[$call['op']] ?? null);
+        if ($view === null) {
+            return $path;
+        }
+        $view['paths'] = [];
+        $this->operations[$call['op']] = $view;
+        clearstatcache(true, $view['sourceUri']);
+        if (
+            !is_string($path) || $view['blog'] !== get_current_blog_id()
+            || file_exists($view['basedir'] . '/' . $view['source'])
+        ) {
+            return $path;
+        }
+        $base = $view['basedir'] . '/';
+        $path = wp_normalize_path($path);
+        $relative = str_starts_with($path, $base) ? rawurldecode(substr($path, strlen($base))) : '';
+        if (!$this->isImage($relative) || $relative === $view['source']) {
+            return $path;
+        }
+        $uri = $view['root'] . '/' . $relative;
+        // Report a cache hit without probing the source. The browser gets this exact derivative or a 404.
+        $view['paths'] = [$view['sourceUri'] => true, $uri => true];
+        $this->operations[$call['op']] = $view;
+        return $uri;
+    }
+
+    public function stat(string $uri): ?array
+    {
+        $call = $this->operation();
+        $view = $call === null ? null : ($this->operations[$call['op']] ?? null);
+        if ($view === null || $view['blog'] !== get_current_blog_id() || !isset($view['paths'][$uri])) {
+            return null;
+        }
+        // Synthetic cache-hit metadata, not the remote file's size or timestamps.
+        return ['size' => 1, 'mtime' => 0];
+    }
+
+    private function isImage(string $relative): bool
+    {
+        $proxy = RemoteMediaProxy::getInstance();
+        if (!$proxy->isValidPath($relative)) {
+            return false;
+        }
+        $mime = $proxy->getMimeType($relative);
+        return $mime !== null && str_starts_with($mime, 'image/') && $mime !== 'image/svg+xml';
+    }
+
+    private function operation(bool $pathLookup = false): ?array
+    {
+        // Only Timber's direct path lookup within a non-forced Resize may see the synthetic filesystem.
+        // phpcs:ignore WordPress.PHP.DevelopmentFunctions.error_log_debug_backtrace -- Identify the Resize operation and source; never log the trace.
+        $trace = debug_backtrace(0, 24);
+        foreach ($trace as $index => $frame) {
+            if ($pathLookup && ($frame['function'] ?? '') === 'wp_upload_dir') {
+                $caller = $trace[$index + 1] ?? [];
+                if (
+                    ($caller['class'] ?? '') !== ImageHelper::class
+                    || ($caller['function'] ?? '') !== '_get_file_path'
+                ) {
+                    return null;
+                }
+                $pathLookup = false;
+            }
+            if (($frame['class'] ?? '') === ImageHelper::class && ($frame['function'] ?? '') === '_operate') {
+                $args = $frame['args'] ?? [];
+                if (
+                    $pathLookup || !is_string($args[0] ?? null) || !(($args[1] ?? null) instanceof Resize)
+                    || !empty($args[2])
+                ) {
+                    return null;
+                }
+                return ['src' => $args[0], 'op' => $args[1]];
+            }
+        }
+        return null;
+    }
+}
