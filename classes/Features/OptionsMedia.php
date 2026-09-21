@@ -8,9 +8,9 @@ defined('ABSPATH') || exit;
 
 final class OptionsMedia
 {
-    public const OPTION_NAME = 'remote_media_proxy';
+    public const string OPTION_NAME = 'remote_media_proxy';
 
-    private const CONFIG_CONSTANTS = [
+    private const array CONFIG_CONSTANTS = [
         'enabled' => 'REMOTE_MEDIA_PROXY_ENABLED',
         'url' => 'REMOTE_MEDIA_PROXY_URL',
         'username' => 'REMOTE_MEDIA_PROXY_USERNAME',
@@ -60,7 +60,7 @@ final class OptionsMedia
         add_settings_section(
             self::OPTION_NAME,
             __('Remote Media Proxy', 'remote-media-proxy'),
-            [$this, 'renderDescription'],
+            $this->renderDescription(...),
             'media'
         );
         $fields = [
@@ -90,7 +90,7 @@ final class OptionsMedia
             if ($name !== 'enabled') {
                 $args['label_for'] = $id;
             }
-            add_settings_field($id, $field['label'], [$this, 'renderField'], 'media', self::OPTION_NAME, $args);
+            add_settings_field($id, $field['label'], $this->renderField(...), 'media', self::OPTION_NAME, $args);
         }
     }
 
