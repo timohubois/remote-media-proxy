@@ -8,3 +8,4 @@ phpcs.xml
 rector.php
 README.md
 vendor/
+tests/
