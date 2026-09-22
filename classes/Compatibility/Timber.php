@@ -171,12 +171,7 @@ final class Timber
             );
         }
         $expiresAt = null;
-        $file = $this->openDerivative(
-            new Resize($recipe['width'], $recipe['height'], $recipe['crop']),
-            $recipe['source'],
-            $recipe['target'],
-            $expiresAt
-        );
+        $file = $this->openDerivative($recipe, $expiresAt);
         if ($file === null) {
             return new WP_Error(
                 'remote_media_proxy_unavailable',
@@ -507,14 +502,14 @@ final class Timber
     /**
      * Retrieve a derivative or run a validated native resize after a confirmed remote 404.
      *
-     * @param Resize       $operation Reconstructed native operation using signed, validated parameters.
-     * @param string       $source    Validated uploads-relative original path.
-     * @param string       $target    Validated uploads-relative derivative path.
-     * @param integer|null $expiresAt Receives the returned bytes' absolute freshness deadline.
+     * @param array<string,mixed> $recipe    Signed, validated source, target and native resize parameters.
+     * @param integer|null        $expiresAt Receives the returned bytes' absolute freshness deadline.
      * @return MediaFile|null Independent result reader, or null when retrieval or generation fails.
      */
-    private function openDerivative(Resize $operation, string $source, string $target, ?int &$expiresAt): ?MediaFile
+    private function openDerivative(array $recipe, ?int &$expiresAt): ?MediaFile
     {
+        $source = $recipe['source'];
+        $target = $recipe['target'];
         $proxy = RemoteMediaProxy::getInstance();
         $type = $proxy->getMimeType($target);
         if ($type === null || $type !== $proxy->getMimeType($source)) {
@@ -544,15 +539,26 @@ final class Timber
             ) {
                 return null;
             }
+            $operation = new Resize($recipe['width'], $recipe['height'], $recipe['crop']);
             if (!$operation->run($input, $output)) {
                 return null;
             }
-            // Never publish another format or partial output as the requested derivative.
+            // Native Timber can ignore a crop error and save the original despite reporting success.
             $image = wp_getimagesize($output);
-            if (is_array($image) && ($image['mime'] ?? null) === $type && min($image[0], $image[1]) > 0) {
-                if ($proxy->storeUpload($target, $output, $sourceExpiresAt)) {
-                    return $proxy->openUpload($target, $missing, $expiresAt);
+            if (!is_array($image) || ($image['mime'] ?? null) !== $type || min($image[0], $image[1]) < 1) {
+                return null;
+            }
+            $animated = $type === 'image/gif' && ImageHelper::is_animated_gif($output);
+            foreach (['width' => 0, 'height' => 1] as $dimension => $axis) {
+                $requested = (float) $recipe[$dimension];
+                // Leave zero-axis inference native. Animated GIFs pass dimensions directly to Imagick's integer API.
+                $expected = $animated ? (int) $requested : (int) round($requested);
+                if ($requested > 0 && $image[$axis] !== $expected) {
+                    return null;
                 }
+            }
+            if ($proxy->storeUpload($target, $output, $sourceExpiresAt)) {
+                return $proxy->openUpload($target, $missing, $expiresAt);
             }
         } catch (\Throwable) {
             // Return a controlled image error, never original bytes or an exception's internal details.
