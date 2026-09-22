@@ -15,6 +15,9 @@ final class RemoteMediaProxy
     /** @var array<string, array{size: int, type: string}|null> Request-local metadata and failed HEADs. */
     private array $metadata = [];
 
+    /** @var array<string,true> Failed GET identities with a confirmed remote HTTP 404 response. */
+    private array $missing = [];
+
     /** @var self|null Shared backend for the current PHP request. */
     private static ?RemoteMediaProxy $instance = null;
 
@@ -42,12 +45,13 @@ final class RemoteMediaProxy
     /**
      * Open a local-first reader while retaining shared downloads until request shutdown.
      *
-     * @param string $relativePath Path relative to the current site's uploads directory.
+     * @param string  $relativePath Path relative to the current site's uploads directory.
+     * @param boolean $missing      Receives true only for a confirmed remote HTTP 404.
      * @return MediaFile|null Independent reader owned by the caller, or null when unavailable.
      */
-    public function openUpload(string $relativePath): ?MediaFile
+    public function openUpload(string $relativePath, bool &$missing = false): ?MediaFile
     {
-        $file = $this->fetch($relativePath, false);
+        $file = $this->fetch($relativePath, false, $missing);
         if ($file === null) {
             return null;
         }
@@ -75,16 +79,18 @@ final class RemoteMediaProxy
      *
      * @param string  $relativePath Upload-relative path to validate and resolve.
      * @param boolean $metadataOnly Whether the caller needs metadata rather than file bytes.
+     * @param boolean $missing      Receives whether a body request returned HTTP 404.
      * @return array{size:int,type:string,path?:string}|null Validated result; body retrieval includes a local path.
      */
-    private function fetch(string $relativePath, bool $metadataOnly): ?array
+    private function fetch(string $relativePath, bool $metadataOnly, bool &$missing = false): ?array
     {
+        $missing = false;
         if ($this->fetching) {
             return null;
         }
         $this->fetching = true;
         try {
-            return $this->requestUpload($relativePath, $metadataOnly);
+            return $this->requestUpload($relativePath, $metadataOnly, $missing);
         } finally {
             $this->fetching = false;
         }
@@ -95,9 +101,10 @@ final class RemoteMediaProxy
      *
      * @param string  $relativePath Upload-relative path to validate and resolve.
      * @param boolean $metadataOnly Whether to inspect metadata without downloading a body.
+     * @param boolean $missing      Receives whether a body request returned HTTP 404.
      * @return array{size:int,type:string,path?:string}|null Validated result, or null when unavailable.
      */
-    private function requestUpload(string $relativePath, bool $metadataOnly): ?array
+    private function requestUpload(string $relativePath, bool $metadataOnly, bool &$missing): ?array
     {
         if (!$this->isValidPath($relativePath)) {
             return null;
@@ -150,6 +157,7 @@ final class RemoteMediaProxy
             return $this->metadata[$key];
         }
         if (!$metadataOnly && array_key_exists($key, $this->downloads)) {
+            $missing = isset($this->missing[$key]);
             return null;
         }
         // Negative results are scoped to this operation: a failed HEAD must not prevent a usable GET.
@@ -158,7 +166,10 @@ final class RemoteMediaProxy
             return $this->metadata[$key] = $this->requestRemote($remoteUrl, $headers, $mimeType, true);
         }
         $this->downloads[$key] = null;
-        $file = $this->requestRemote($remoteUrl, $headers, $mimeType, false);
+        $file = $this->requestRemote($remoteUrl, $headers, $mimeType, false, $missing);
+        if ($missing) {
+            $this->missing[$key] = true;
+        }
         if ($file !== null) {
             $this->downloads[$key] = $file;
             $this->metadata[$key] = ['size' => $file['size'], 'type' => $file['type']];
@@ -173,10 +184,16 @@ final class RemoteMediaProxy
      * @param array<string,string> $headers      Source request headers, including configured authentication.
      * @param string               $mimeType     Expected MIME type allowed by the current WordPress context.
      * @param boolean              $metadataOnly Whether to send HEAD instead of downloading with GET.
+     * @param boolean              $missing      Receives whether the remote returned HTTP 404, never a transport error.
      * @return array{size:int,type:string,path?:string}|null Validated result, or null on rejection or failure.
      */
-    private function requestRemote(string $remoteUrl, array $headers, string $mimeType, bool $metadataOnly): ?array
-    {
+    private function requestRemote(
+        string $remoteUrl,
+        array $headers,
+        string $mimeType,
+        bool $metadataOnly,
+        bool &$missing = false
+    ): ?array {
         $requestArgs = [
             'redirection' => 0,
             'sslverify' => true,
@@ -201,7 +218,12 @@ final class RemoteMediaProxy
             $response = $metadataOnly
                 ? wp_safe_remote_head($remoteUrl, $requestArgs)
                 : wp_safe_remote_get($remoteUrl, $requestArgs);
-            if (is_wp_error($response) || wp_remote_retrieve_response_code($response) !== 200) {
+            if (is_wp_error($response)) {
+                return null;
+            }
+            $status = wp_remote_retrieve_response_code($response);
+            $missing = $status === 404;
+            if ($status !== 200) {
                 return null;
             }
             $contentType = wp_remote_retrieve_header($response, 'content-type');
