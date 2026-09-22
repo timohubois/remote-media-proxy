@@ -69,14 +69,20 @@ final class WordPress
     }
 
     /**
-     * Deliver validated bytes with only their remaining freshness, never stale-while-revalidate.
+     * Deliver validated bytes with remaining freshness and an optional browser-only stale window.
      *
-     * @param MediaFile    $file      Reader consumed and closed by this response adapter.
-     * @param integer|null $expiresAt Absolute remote or generated deadline, or null for physical local bytes.
+     * @param MediaFile    $file       Reader consumed and closed by this response adapter.
+     * @param integer|null $expiresAt  Absolute remote or generated deadline, or null for physical local bytes.
+     * @param boolean      $allowStale Whether browser revalidation may reuse bytes for another sixty seconds.
+     * @param boolean      $headOnly   Whether to send headers without emitting file bytes.
      * @return boolean Whether headers and bytes were sent; false leaves normal template handling intact.
      */
-    public static function sendFile(MediaFile $file, ?int $expiresAt = null): bool
-    {
+    public static function sendFile(
+        MediaFile $file,
+        ?int $expiresAt = null,
+        bool $allowStale = false,
+        bool $headOnly = false
+    ): bool {
         try {
             if (headers_sent()) {
                 return false;
@@ -98,13 +104,15 @@ final class WordPress
             header_remove('Expires');
             header_remove('Pragma');
             header_remove('ETag');
-            header('Cache-Control: ' . self::cacheControl($expiresAt));
+            header('Cache-Control: ' . self::cacheControl($expiresAt, $allowStale));
             header('Content-Type: ' . $file->type);
             header('Content-Length: ' . $file->size);
             header('X-Content-Type-Options: nosniff');
             header("Content-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'");
             // Binary media, not HTML. The download has already passed MIME and size validation.
-            fpassthru($file->stream);
+            if (!$headOnly) {
+                fpassthru($file->stream);
+            }
             return true;
         } finally {
             $file->close();
@@ -114,11 +122,13 @@ final class WordPress
     /**
      * Avoid stacking browser freshness on top of the age of cached media.
      *
-     * @param integer|null $expiresAt Cached bytes' absolute deadline, or null for physical local bytes.
-     * @return string Private response policy with mandatory revalidation after expiration.
+     * @param integer|null $expiresAt  Cached bytes' absolute deadline, or null for physical local bytes.
+     * @param boolean      $allowStale Whether the browser may reuse stale bytes during revalidation.
+     * @return string Private browser policy; server-side cache entries are never reused stale.
      */
-    private static function cacheControl(?int $expiresAt): string
+    private static function cacheControl(?int $expiresAt, bool $allowStale = false): string
     {
-        return 'private, max-age=' . ($expiresAt === null ? 300 : max(0, $expiresAt - time())) . ', must-revalidate';
+        return 'private, max-age=' . ($expiresAt === null ? 300 : max(0, $expiresAt - time()))
+            . ($allowStale ? ', stale-while-revalidate=60' : ', must-revalidate');
     }
 }
