@@ -27,7 +27,7 @@ Network-wide failures retain per-site diagnostics. A user-specific routing notic
 
 **Protected media:** HTTP sends Basic Auth credentials without transport encryption; prefer HTTPS. Source Basic Auth does not restrict visitors to the destination site. Protect local and staging sites separately. Saved passwords are encrypted using the existing WordPress authentication keys; keep `wp-config.php` private. After changing those keys or cloning with new keys, re-enter the password.
 
-Ordinary media requests require the exact remote file. Supported Timber resizes can generate a missing derivative temporarily during page rendering. See [readme.txt](readme.txt) for server configuration, request limits, compatibility and security notes.
+Ordinary media requests require the exact remote file. Supported Timber resizes use signed image requests that can generate a missing derivative without blocking template rendering. See [readme.txt](readme.txt) for server configuration, request limits, compatibility and security notes.
 
 ## Remote file access
 
@@ -37,21 +37,37 @@ Within one PHP request, repeated remote reads reuse one validated download with 
 
 Closing a reader releases its handle, not the shared file. Complete validated downloads and generated derivatives are retained across requests. Unpublished or failed staging files are submitted to `wp_delete_file()`; failed or filtered deletions remain tracked for a shutdown retry. At shutdown, remaining readers close before request-owned files are deleted. Local originals and retained cache entries are never removed by request cleanup. Interrupted shutdown or a killed worker can leave staging files for host or administrator cleanup; the plugin never sweeps shared temporary storage.
 
-Proxied browser responses use `Cache-Control: private, max-age=<remaining seconds>, must-revalidate`. Server and browser share a five-minute deadline: there is no stale-while-revalidate, background refresh or extra browser freshness window. Expired bytes are not served after refresh failure. Cached media can remain visible briefly after source settings change or the proxy is disabled. Refreshes download the full file; no conditional revalidation is implemented. Native local-file responses and errors retain their existing caching behavior.
+Ordinary proxy responses use `Cache-Control: private, max-age=<remaining seconds>, must-revalidate`. Signed Timber image responses instead append `stale-while-revalidate=60`: a supporting browser can briefly display its previous image while revalidating. Both use the server entry's remaining five-minute freshness, not another full window. The server itself never serves expired entries, and the plugin schedules no cron or background jobs. Cached media can remain visible briefly after source settings change or the proxy is disabled. Refreshes download the full file; no conditional revalidation is implemented. Native local-file responses and errors retain their existing caching behavior.
 
 The WordPress adapter connects browser requests and compatible attachment readers to this layer. It does not replace PHP's native filesystem or intercept arbitrary absolute paths.
 
 ### Timber resizing
 
-For non-forced `ImageHelper::resize()` calls with missing local raster originals, `Compatibility/Timber` first reuses a fresh cached derivative, then requests the exact remote derivative. Only a confirmed remote HTTP 404 permits retrieving the original and running the actual native Timber operation against private temporary files. Authentication failures, timeouts and other errors do not trigger generation. This runs during page rendering: a cold or expired cache can delay HTML delivery. Existing local originals and derivatives retain local precedence.
+For supported non-forced `ImageHelper::resize()` calls with missing local raster originals and derivatives, `Compatibility/Timber` returns a deterministic signed REST image URL. Template rendering does not fetch or generate that derivative. When the browser requests the image, the endpoint first uses a local or fresh cached file, then requests the exact remote derivative. Only a confirmed remote HTTP 404 permits retrieving the original and running a native Timber resize against private staging files. Authentication failures, timeouts and other errors do not trigger generation. Existing local originals and derivatives retain their native behavior and ordinary URLs.
 
-Native PHP calls, Twig `resize` and Flynt's normal `resizeDynamic` delegation share this flow; matching `/resized/` URL/path filters remain intact. No Twig filters are replaced, no resize recipes are serialized, and public image URLs have no added query parameters. Missing or failed derivatives are not replaced with originals. Arbitrary transformation chains and Flynt's separate on-demand generation route are not covered.
+Native PHP calls, Twig `resize` and Flynt's normal `resizeDynamic` delegation share this flow. Matching URL/path filters determine the signed upload-relative target. No Twig filters are replaced. Instructions contain source/target paths and scalar width, height and crop parameters—not PHP objects or source credentials. Missing or failed derivatives are not replaced with originals. Arbitrary transformation chains, custom Resize subclasses and Flynt's separate on-demand generation route are not covered. Filters registered only inside template rendering cannot automatically be reproduced in a separate REST request.
 
-The scoped metadata-only stream view still lets Timber return its exact native URL after this work, without rerunning the operation or writing to uploads. Timber 1/2 resolve the source path privately, expose only a destination-path filter, and may return the original on failure. Replacing the view with a temporary `basedir` alone would not preserve those contracts. The view grants no byte reads or writes.
+The scoped metadata-only stream view lets Timber return the selected URL without running the operation or writing to uploads. Timber 1/2 resolve the source path privately, expose only a destination-path filter, and may return the original on failure. Replacing the view with a temporary `basedir` alone would not preserve those contracts. The view grants no byte reads or writes.
 
 For Timber 1 attachment images with missing local raster files, valid WordPress attachment dimensions also seed the image object's in-memory dimension cache. This supports `width()`, `height()` and `aspect()` without remote reads or changes to stored metadata. Images without valid attachment dimensions retain native behavior.
 
 This compatibility workaround relies on Timber's private path-resolution flow. It has been tested with versions 1.22.0, 2.3.3 and 2.4.1, but is not version-gated; compatibility with other releases is not guaranteed. It requires `allow_url_fopen`; forced operations, SVGs and existing local originals retain native behavior. It does not enable Flynt's separate dynamic-generation mode or add attachment metadata to the database.
+
+### REST routing
+
+The shared namespace is `remote-media-proxy/v1`. Integrations register explicit WordPress routes; there is no catch-all dispatcher or automatic exposure of feature methods. Currently the only plugin REST route is:
+
+```text
+GET|HEAD /remote-media-proxy/v1/timber/resize/2024/07/hero-3.jpg
+    ?width=1920&height=800&crop=center
+    &target=resized%2F2024%2F07%2Fhero-3-1920x800-c-center.jpg&sig=…
+```
+
+`rest_url()` supplies the site's REST prefix or plain-permalink URL. The route preserves the original filename; query parameters describe the resize and exact filtered destination. A compact, full-length SHA-256 HMAC binds all these values to the operation, installation, site and current source configuration. Parameters have a stable order, and identical operations produce identical complete URLs, including the signature. Query strings do not prevent browser caching. They are deterministic, not expiring WordPress nonces, so repeated renders can reuse the browser's image cache. Changing source settings or authentication keys invalidates old signed URLs; cached HTML then needs refreshing. The REST API must be available to intended image viewers; the plugin does not bypass other REST authentication policies.
+
+The endpoint uses native WordPress route registration, permission callbacks and binary response serving. There are no speculative `/wordpress/` or `/feature/` endpoints. Ordinary upload URLs and PHP attachment reads continue using the shared backend directly, without HTTP calls back to this site.
+
+Cold images and images outside the browser's stale window still wait for retrieval or generation. PHP attachment reads and uncached metadata checks can still delay HTML. Browser stale-while-revalidate does not guarantee immediate source updates, nor does it refresh images without a new image request.
 
 ### One disposable media cache
 
@@ -63,7 +79,7 @@ On a miss, a producer writes one private random staging file inside the cache di
 
 If cache storage cannot accept a remote download, it may still be delivered from request-local temporary storage and removed at shutdown. Existing `.cache`, `.lock` and loose temporary files from earlier development versions are not adopted or automatically swept.
 
-An expired or host-deleted derivative is regenerated on the next **page render**, not an image-only request. Image-only requests fall through to exact-file proxying and may return 404 if the remote derivative is also missing. Cached HTML therefore may need refreshing. Unwritable or full cache storage leaves newly generated derivatives unavailable without breaking page rendering. The plugin does not alter host cleanup policy, recreate missing bytes from expired entries, or sweep shared temporary storage.
+An expired or host-deleted derivative can be regenerated by its next valid signed image request, without rerendering the page. Ordinary upload URLs do not carry resize instructions and still require an exact local, cached or remote file. Unwritable or full cache storage leaves newly generated derivatives unavailable without breaking page rendering. The plugin does not alter host cleanup policy, recreate missing bytes from expired entries, or sweep shared temporary storage.
 
 Fresh entries can contain an older source image until their deadline. Refreshing prefers any existing remote derivative; invalidating outdated derivatives on the remote site remains that site's responsibility. Original image decoding and processing still consume PHP/server memory and execution time.
 
