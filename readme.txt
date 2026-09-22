@@ -62,23 +62,31 @@ The plugin uses WordPress's allowed MIME types through get_allowed_mime_types(),
 
 = Does the plugin download or cache media locally? =
 
-Browser requests and compatible PHP readers use the same read-only file access. Existing local files are read directly. Missing files download into private temporary storage. Repeated reads within the same PHP request reuse the download through independent file handles; metadata and failed lookups are also reused. Temporary files are deleted at request shutdown, not when an individual reader closes. Media files are never added to uploads. Neither media bodies nor metadata are cached server-side across requests. Metadata checks do not download file bodies. Other plugins or themes may write their own files.
+Browser requests and compatible PHP readers share one cache-first backend: existing local files take precedence, then fresh cached files, then remote downloads. Complete validated downloads and locally generated derivatives are retained in private temporary storage for reuse across requests. Each reader has its own file handle. Cache hits create no working files or directories and make no remote requests. Media files are never added to uploads. Metadata checks use local or cached bytes when available, otherwise HEAD without downloading a body; HEAD-only results and failed lookups remain request-local. Other plugins or themes may write their own files.
 
-Successful proxied media responses allow private browser caching for five minutes, followed by up to one minute of stale reuse while supporting browsers refresh in the background. Cached media may remain visible briefly after source settings change or the proxy is disabled. Refreshes transfer the full file. Local files and error responses keep their existing caching behavior.
+Proxied media is reusable for up to five minutes. Browser responses receive only the server entry's remaining lifetime, with private caching and must-revalidate. There is no stale-while-revalidate or background refresh; expired bytes are not served after refresh failure. Cached media may remain visible briefly after source settings change or the proxy is disabled. Refreshes transfer the full file. Native local-file responses and errors keep their existing caching behavior.
 
-WordPress chooses the temporary directory, including any WP_TEMP_DIR configuration. It must be writable and outside known web roots, including WordPress and uploads directories. If no suitable directory is available, remote file reads are unavailable and browser requests keep normal missing-file handling. Failed downloads are submitted for deletion immediately. Cleanup uses wp_delete_file(); failed or filtered deletions are retained for another attempt at shutdown. At PHP shutdown, remaining reader handles are closed before temporary files are deleted. If the hosting service kills the PHP process, files may remain for the host or administrator to clean up; the plugin never sweeps the shared temporary directory.
+WordPress chooses the temporary directory, including any WP_TEMP_DIR configuration. It must be writable and outside known web roots, including WordPress and uploads directories. If no suitable directory is available, remote file reads are unavailable and browser requests keep normal missing-file handling. Failed downloads are submitted for deletion immediately. Cleanup uses wp_delete_file(); failed or filtered deletions are retained for another attempt at shutdown. At PHP shutdown, remaining reader handles close before unpublished working files are deleted. Retained cache entries survive request cleanup. Interrupted shutdown or a killed worker can leave staging files for the host or administrator to clean up; the plugin never sweeps shared temporary storage.
 
 = Does it generate missing image sizes or support image editing? =
 
-No. The source must already serve the requested file or image size. Missing sizes are not generated or replaced with originals. Image editing, resizing and code requiring physical local files are not guaranteed compatible.
+Ordinary media requests require the exact remote file. For supported Timber resize calls, a missing remote derivative can be generated temporarily during page rendering. Failed derivatives are never replaced with originals. General image editing, other transformations and code requiring physical files in uploads are not guaranteed compatible.
 
 = Does it work with Timber and Flynt resizing? =
 
-With Timber and allow_url_fopen enabled, ordinary resize calls can return the correct resized URL even when the local original is missing. This includes native PHP calls, Twig's resize filter and Flynt's resizeDynamic when it wraps Timber resizing. Local originals keep native behavior. No remote availability checks run during URL generation: the exact derivative must exist locally or remotely, otherwise its request returns 404.
+With Timber and allow_url_fopen enabled, ordinary resize calls retain their native URLs even when the local original is missing. This includes native PHP calls, Twig's resize filter and Flynt's resizeDynamic when it wraps normal Timber resizing. The plugin reuses a fresh cached derivative or requests the exact remote derivative. On a confirmed remote 404, it retrieves the original temporarily and runs the native Timber resize operation. This can delay page rendering on cache misses. Authentication failures, network failures and other remote errors do not trigger generation. Existing local files keep precedence.
 
 For Timber 1 attachment images whose local raster files are missing, valid WordPress attachment dimensions provide width, height and aspect ratio without downloading the image. Stored metadata is not changed. Images without valid attachment dimensions retain native behavior.
 
-The compatibility adapter uses a read-only, metadata-only filesystem view and depends on Timber internals. It has been tested with Timber 1.22.0, 2.3.3 and 2.4.1. There is no version restriction, but compatibility with other releases is not guaranteed. Forced resizing and SVGs retain native behavior; the plugin does not enable Flynt's separate dynamic-generation mode or generate missing files.
+The compatibility adapter uses a read-only, metadata-only filesystem view and depends on Timber internals. It has been tested with Timber 1.22.0, 2.3.3 and 2.4.1. There is no version restriction, but compatibility with other releases is not guaranteed. Forced resizing and SVGs retain native behavior. Flynt's separate on-demand generation route and arbitrary transformation chains are not covered.
+
+= How are cached files stored? =
+
+All validated remote downloads and generated derivatives share one private, installation/site-specific directory below WordPress's temporary directory. Each media identity has a stable filename, isolated by source and credentials. On a miss, a private staging file is downloaded or generated, validated, and atomically moved into place without copying its contents. Readers cannot observe a partially published file. No lock files or per-operation working directories are created. Concurrent cold requests may duplicate work.
+
+There are no new settings, size limits or scheduled cleanup jobs. Expiration means a cache miss, not deletion. Successful regeneration atomically replaces the expired entry. Unused files may remain until the host or administrator removes them; temporary directories do not guarantee automatic cleanup. Only unpublished or failed working files remain request-owned and are cleaned up. Generating a derivative from a cached original does not extend that original's freshness deadline.
+
+The host may remove cached files at any time. The next page render can regenerate them. An image-only request does not perform generation: it retries the exact remote file and may return 404 if that file is also missing. Cached pages may therefore need refreshing. Unavailable cache storage leaves newly generated derivatives unavailable rather than breaking the page or writing into uploads. A validated remote download can still be served request-locally if it cannot be retained.
 
 = Can PHP read a missing attachment? =
 
@@ -124,7 +132,7 @@ Network-wide routing failures are reported per site. A user-specific notice is r
 
 = What happens when I disable or remove the plugin? =
 
-Disabling or deactivating clears owned routing directives and keeps settings. Uninstall also removes the plugin's settings, never media. Harmless marker comments and the shared .htaccess file remain. Cleanup failures are reported so they can be resolved and retried.
+Disabling or deactivating clears owned routing directives and keeps settings. Uninstall also removes the plugin's settings, never uploads or attachment data. Disposable cached files are left to host or administrator cleanup. Harmless marker comments and the shared .htaccess file remain. Cleanup failures are reported so they can be resolved and retried.
 
 Disable routing before moving WordPress or its content directory. Avoid running overlapping upload proxies.
 

@@ -27,25 +27,45 @@ Network-wide failures retain per-site diagnostics. A user-specific routing notic
 
 **Protected media:** HTTP sends Basic Auth credentials without transport encryption; prefer HTTPS. Source Basic Auth does not restrict visitors to the destination site. Protect local and staging sites separately. Saved passwords are encrypted using the existing WordPress authentication keys; keep `wp-config.php` private. After changing those keys or cloning with new keys, re-enter the password.
 
-The source must already serve the requested files and image sizes. See [readme.txt](readme.txt) for server configuration, request limits, compatibility and security notes.
+Ordinary media requests require the exact remote file. Supported Timber resizes can generate a missing derivative temporarily during page rendering. See [readme.txt](readme.txt) for server configuration, request limits, compatibility and security notes.
 
 ## Remote file access
 
-Browser delivery and compatible PHP readers share one read-only file layer: existing local files first, otherwise a validated temporary download. All remote reads use the same authentication and response validation, without plugin-imposed file-size limits or dependence on the site's upload allowance. Metadata checks use local file information or remote `HEAD` requests without downloading the body.
+Browser delivery and compatible PHP readers share one read-only file layer: local file first, then a fresh cached file, otherwise a validated remote download. All remote reads use the same authentication and response validation, without plugin-imposed file-size limits or dependence on the site's upload allowance. Metadata checks use local or cached file information, otherwise remote `HEAD` requests without downloading the body. HEAD-only results remain request-local.
 
 Within one PHP request, repeated remote reads reuse one validated download with independent reader handles. Metadata and failed lookups are also reused within that request, isolated by site, source and credentials. Local files always take precedence.
 
-Closing a reader releases its handle, not the shared file. At PHP shutdown, remaining handles are closed before temporary files are deleted; failed downloads are submitted to `wp_delete_file()` immediately. Failed or filtered deletions remain tracked for a shutdown retry. Local originals are never deleted. Neither media bodies nor metadata are cached server-side across requests. A process killed by the host can leave an orphan; host-managed cleanup remains necessary. The plugin never sweeps a shared temporary directory, and concurrent requests still count toward hosting quotas.
+Closing a reader releases its handle, not the shared file. Complete validated downloads and generated derivatives are retained across requests. Unpublished or failed staging files are submitted to `wp_delete_file()`; failed or filtered deletions remain tracked for a shutdown retry. At shutdown, remaining readers close before request-owned files are deleted. Local originals and retained cache entries are never removed by request cleanup. Interrupted shutdown or a killed worker can leave staging files for host or administrator cleanup; the plugin never sweeps shared temporary storage.
 
-Successful proxied browser responses use `Cache-Control: private, max-age=300, stale-while-revalidate=60`: five minutes of browser caching, then up to one minute of stale reuse while supporting browsers refresh in the background. Cached media can remain visible briefly after source settings change or the proxy is disabled. Refreshes download the full file; no conditional revalidation is implemented. Local files and error responses retain their existing caching behavior.
+Proxied browser responses use `Cache-Control: private, max-age=<remaining seconds>, must-revalidate`. Server and browser share a five-minute deadline: there is no stale-while-revalidate, background refresh or extra browser freshness window. Expired bytes are not served after refresh failure. Cached media can remain visible briefly after source settings change or the proxy is disabled. Refreshes download the full file; no conditional revalidation is implemented. Native local-file responses and errors retain their existing caching behavior.
 
 The WordPress adapter connects browser requests and compatible attachment readers to this layer. It does not replace PHP's native filesystem or intercept arbitrary absolute paths.
 
-For Timber, a scoped, metadata-only filesystem view lets non-forced `ImageHelper::resize()` calls return Timber's own derivative URLs when local raster originals are missing. This also covers Twig `resize` and Flynt's `resizeDynamic` when it delegates to Timber; Flynt's `/resized/` path filters remain intact. No Twig filters are replaced. The view reports a synthetic cache hit, not actual remote existence or file metadata, and denies file reads and writes. Rendering performs no remote probes; the browser receives the exact requested derivative or a 404.
+### Timber resizing
+
+For non-forced `ImageHelper::resize()` calls with missing local raster originals, `Compatibility/Timber` first reuses a fresh cached derivative, then requests the exact remote derivative. Only a confirmed remote HTTP 404 permits retrieving the original and running the actual native Timber operation against private temporary files. Authentication failures, timeouts and other errors do not trigger generation. This runs during page rendering: a cold or expired cache can delay HTML delivery. Existing local originals and derivatives retain local precedence.
+
+Native PHP calls, Twig `resize` and Flynt's normal `resizeDynamic` delegation share this flow; matching `/resized/` URL/path filters remain intact. No Twig filters are replaced, no resize recipes are serialized, and public image URLs have no added query parameters. Missing or failed derivatives are not replaced with originals. Arbitrary transformation chains and Flynt's separate on-demand generation route are not covered.
+
+The scoped metadata-only stream view still lets Timber return its exact native URL after this work, without rerunning the operation or writing to uploads. Timber 1/2 resolve the source path privately, expose only a destination-path filter, and may return the original on failure. Replacing the view with a temporary `basedir` alone would not preserve those contracts. The view grants no byte reads or writes.
 
 For Timber 1 attachment images with missing local raster files, valid WordPress attachment dimensions also seed the image object's in-memory dimension cache. This supports `width()`, `height()` and `aspect()` without remote reads or changes to stored metadata. Images without valid attachment dimensions retain native behavior.
 
-This compatibility workaround relies on Timber's private path-resolution flow. It has been tested with versions 1.22.0, 2.3.3 and 2.4.1, but is not version-gated; compatibility with other releases is not guaranteed. It requires `allow_url_fopen`; forced operations, SVGs and existing local originals retain native behavior. It does not enable Flynt's separate dynamic-generation mode, discover available derivatives, generate sizes or add persistent metadata caching.
+This compatibility workaround relies on Timber's private path-resolution flow. It has been tested with versions 1.22.0, 2.3.3 and 2.4.1, but is not version-gated; compatibility with other releases is not guaranteed. It requires `allow_url_fopen`; forced operations, SVGs and existing local originals retain native behavior. It does not enable Flynt's separate dynamic-generation mode or add attachment metadata to the database.
+
+### One disposable media cache
+
+`Media/FileCache` is generic storage, independent of Timber. Consumers provide opaque identities and a freshness window. Entries share one private directory per installation/site below `get_temp_dir()` (respecting `WP_TEMP_DIR`); consumer names prevent key collisions. There are no additional settings, size limits, eviction jobs or scheduled cleanup. Expiration controls reuse, not deletion: unused files may accumulate until the host or administrator removes them. Temporary storage is not guaranteed to be automatically cleaned.
+
+All validated downloads and generated derivatives use the same backend identity and delivery path. Each identity has one stable hashed filename with its native extension, isolated by site, source, credentials and MIME policy. Fresh cache hits allocate no staging files, create no directories and make no HTTP requests. Reads do not renew the deadline; generated files inherit their source's remaining lifetime rather than adding another five minutes.
+
+On a miss, a producer writes one private random staging file inside the cache directory. Only complete validated output is atomically renamed to its stable filename, without copying bytes. `TemporaryFile` then relinquishes ownership. There are no producer locks, separate Timber cache handlers or per-operation `.tmp.d` directories. Concurrent misses can do duplicate work; atomic replacement prevents partial cache reads. Native image-editor format variants of an owned random staging stem are cleaned up with that staging file.
+
+If cache storage cannot accept a remote download, it may still be delivered from request-local temporary storage and removed at shutdown. Existing `.cache`, `.lock` and loose temporary files from earlier development versions are not adopted or automatically swept.
+
+An expired or host-deleted derivative is regenerated on the next **page render**, not an image-only request. Image-only requests fall through to exact-file proxying and may return 404 if the remote derivative is also missing. Cached HTML therefore may need refreshing. Unwritable or full cache storage leaves newly generated derivatives unavailable without breaking page rendering. The plugin does not alter host cleanup policy, recreate missing bytes from expired entries, or sweep shared temporary storage.
+
+Fresh entries can contain an older source image until their deadline. Refreshing prefers any existing remote derivative; invalidating outdated derivatives on the remote site remains that site's responsibility. Original image decoding and processing still consume PHP/server memory and execution time.
 
 ### Stream namespaces
 
@@ -87,7 +107,7 @@ Use site-wide configuration and visit the site's admin after code configuration 
 
 ## Development
 
-`classes/Features/` contains hook-registering features; `classes/Compatibility/` contains auto-started integrations. `classes/Media/` owns retrieval, readers, temporary files and streams. `classes/Helpers/` contains supporting utilities such as password encryption. Media classes and helpers are used on demand, never auto-started.
+`classes/Features/` contains hook-registering features; `classes/Compatibility/` contains auto-started integrations. `classes/Media/` owns retrieval, readers, temporary files, generic file caching and streams. `classes/Helpers/` contains supporting utilities such as password encryption. Media classes and helpers are used on demand, never auto-started.
 
 PHP 8.3 is the minimum supported version and is used for development and CI linting.
 
