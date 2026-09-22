@@ -14,7 +14,7 @@ final class TemporaryFile
     private static bool $registered = false;
 
     /**
-     * Resolve a writable temporary directory outside known web roots.
+     * Resolve a canonical temporary directory outside known web roots; allocation checks write access.
      *
      * @param string|null $path Trusted private staging directory, or null for WordPress's temporary directory.
      * @return string|null Canonical directory with a trailing slash, or null when unsuitable.
@@ -23,7 +23,7 @@ final class TemporaryFile
     {
         $directory = @realpath($path ?? get_temp_dir());
         if (
-            $directory === false || !is_dir($directory) || !wp_is_writable($directory)
+            $directory === false || !is_dir($directory)
             || !function_exists('umask')
         ) {
             return null;
