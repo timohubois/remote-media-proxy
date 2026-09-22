@@ -5,21 +5,33 @@ namespace RemoteMediaProxy\Compatibility;
 use RemoteMediaProxy\Media\StreamWrapper;
 use RemoteMediaProxy\Media\RemoteMediaProxy;
 use RemoteMediaProxy\Media\TemporaryFile;
+use RemoteMediaProxy\Media\MediaFile;
+use RemoteMediaProxy\Features\OptionsMedia;
+use WP_Error;
+use WP_HTTP_Response;
+use WP_REST_Request;
+use WP_REST_Response;
 use Timber\Image\Operation\Resize;
 use Timber\ImageHelper;
 use WeakMap;
 
 defined('ABSPATH') || exit;
 
-/** Preserve native resize URLs and use native render-time operations for missing remote derivatives. */
+/** Defer missing-original Timber resizes to signed image requests while preserving native local-file behavior. */
 final class Timber
 {
+    /** Shared API namespace; each integration registers its own explicit routes. */
+    private const string REST_NAMESPACE = 'remote-media-proxy/v1';
+
+    /** Integration-specific operation, also bound into the recipe signature. */
+    private const string REST_ROUTE = 'timber/resize';
+
     /**
      * Synthetic file metadata lives only as long as its Resize operation, never across requests.
      *
      * @var WeakMap<Resize, array{
      *     root: string, source: string, sourceUri: string, basedir: string, blog: int,
-     *     paths: array<string, true>, lifetime: object
+     *     paths: array<string, true>, lifetime: object, target?: string
      * }>
      */
     private WeakMap $operations;
@@ -53,6 +65,237 @@ final class Timber
         add_filter('timber/url/schemes-whitelist', [$this, 'schemes']);
         add_filter('timber/image/new_path', [$this, 'physicalPath'], PHP_INT_MIN);
         add_filter('timber/image/new_path', [$this, 'prepareFiles'], PHP_INT_MAX);
+        add_filter('timber/image/new_url', [$this, 'deferResize'], PHP_INT_MAX);
+        add_action('rest_api_init', [$this, 'registerRoute']);
+        add_filter('rest_pre_serve_request', [$this, 'serveImage'], 20, 3);
+    }
+
+    /**
+     * Register the signed image route; WordPress still applies its normal REST authentication policy.
+     *
+     * @return void
+     */
+    public function registerRoute(): void
+    {
+        register_rest_route(self::REST_NAMESPACE, '/' . self::REST_ROUTE . '/(?P<source>.+)', [
+                'methods' => ['GET', 'HEAD'],
+                'permission_callback' => [$this, 'authorizeResize'],
+                'callback' => [$this, 'resizeResponse'],
+            ]);
+    }
+
+    /**
+     * Replace an eligible missing derivative URL with deterministic, signed resize instructions.
+     *
+     * @param mixed $url Native derivative URL after theme URL filters have run.
+     * @return mixed Signed REST URL, or the unchanged URL for local or unsupported operations.
+     */
+    public function deferResize(mixed $url): mixed
+    {
+        $call = $this->operation();
+        $view = $call === null ? null : ($this->operations[$call['op']] ?? null);
+        if ($view === null || !is_string($url)) {
+            return $url;
+        }
+        $uploads = wp_get_upload_dir();
+        $base = rtrim($uploads['baseurl'], '/') . '/';
+        if (str_starts_with($url, '/') && !str_starts_with($url, '//')) {
+            $base = (string) wp_parse_url($base, PHP_URL_PATH);
+        }
+        if ($base === '' || !str_starts_with($url, $base)) {
+            return $url;
+        }
+        $target = rawurldecode(substr($url, strlen($base)));
+        if (!$this->isImage($target) || file_exists($view['basedir'] . '/' . $target)) {
+            return $url;
+        }
+        $recipe = ['v' => 1, 'source' => $view['source'], 'target' => $target];
+        try {
+            // Timber exposes neither normalized resize arguments nor an operation-result interception hook.
+            foreach (['w' => 'width', 'h' => 'height', 'crop' => 'crop'] as $property => $name) {
+                $recipe[$name] = (new \ReflectionProperty(Resize::class, $property))->getValue($call['op']);
+            }
+        } catch (\ReflectionException) {
+            return $url;
+        }
+        if (!$this->validRecipe($recipe)) {
+            return $url;
+        }
+        // Query parameters are strings on receipt; sign that same representation without changing numeric spelling.
+        $recipe['width'] = (string) $recipe['width'];
+        $recipe['height'] = (string) $recipe['height'];
+        $parameters = [
+            'width' => $recipe['width'],
+            'height' => $recipe['height'],
+            'crop' => $recipe['crop'] === false ? 'false' : $recipe['crop'],
+            'target' => $target,
+            'sig' => $this->signature($recipe),
+        ];
+        $view['target'] = $target;
+        $this->operations[$call['op']] = $view;
+        $source = implode('/', array_map(rawurlencode(...), explode('/', $recipe['source'])));
+        return add_query_arg(array_map(rawurlencode(...), $parameters), rest_url(
+            self::REST_NAMESPACE . '/' . self::REST_ROUTE . '/' . $source
+        ));
+    }
+
+    /**
+     * Authorize only instructions issued by this installation for its current source configuration.
+     *
+     * @param WP_REST_Request $request Incoming REST image request.
+     * @return boolean|WP_Error True when authorized, or a non-sensitive rejection without retrieving media.
+     */
+    public function authorizeResize(WP_REST_Request $request): bool|WP_Error
+    {
+        return $this->readRecipe($request) !== null ? true : new WP_Error(
+            'remote_media_proxy_invalid_resize',
+            __('Invalid or unavailable image request.', 'remote-media-proxy'),
+            ['status' => 403]
+        );
+    }
+
+    /**
+     * Prepare a binary response through the shared cache, generating only after a remote 404.
+     *
+     * @param WP_REST_Request $request Signature-validated REST request.
+     * @return WP_REST_Response|WP_Error A reader for binary serving, or a controlled failure without original fallback.
+     */
+    public function resizeResponse(WP_REST_Request $request): WP_REST_Response|WP_Error
+    {
+        $recipe = $this->readRecipe($request);
+        if ($recipe === null) {
+            return new WP_Error(
+                'remote_media_proxy_invalid_resize',
+                __('Invalid image request.', 'remote-media-proxy'),
+                ['status' => 403]
+            );
+        }
+        $expiresAt = null;
+        $file = $this->openDerivative(
+            new Resize($recipe['width'], $recipe['height'], $recipe['crop']),
+            $recipe['source'],
+            $recipe['target'],
+            $expiresAt
+        );
+        if ($file === null) {
+            return new WP_Error(
+                'remote_media_proxy_unavailable',
+                __('The image is unavailable.', 'remote-media-proxy'),
+                ['status' => 502]
+            );
+        }
+        // The route-specific serving hook consumes this reader instead of serializing it as JSON.
+        return new WP_REST_Response(['file' => $file, 'expires' => $expiresAt]);
+    }
+
+    /**
+     * Emit only this route's binary results, allowing browser-only stale-while-revalidate.
+     *
+     * @param boolean          $served  Whether another REST serving hook already handled the response.
+     * @param WP_HTTP_Response $result  Final response after WordPress REST dispatch filters.
+     * @param WP_REST_Request  $request Current REST request, including its effective GET or HEAD method.
+     * @return boolean Whether normal REST JSON output must be skipped.
+     */
+    public function serveImage(bool $served, WP_HTTP_Response $result, WP_REST_Request $request): bool
+    {
+        $prefix = '/' . self::REST_NAMESPACE . '/' . self::REST_ROUTE . '/';
+        if ($served || !str_starts_with($request->get_route(), $prefix)) {
+            return $served;
+        }
+        $data = $result->get_data();
+        if (!is_array($data) || !(($data['file'] ?? null) instanceof MediaFile)) {
+            nocache_headers();
+            return false;
+        }
+        WordPress::sendFile($data['file'], $data['expires'], true, $request->get_method() === 'HEAD');
+        return true;
+    }
+
+    /**
+     * Validate explicit route/query instructions and their signature before accessing media.
+     *
+     * @param WP_REST_Request $request Request using a route-only source and query-only operation parameters.
+     * @return array<string,mixed>|null Validated instructions, or null for disabled, malformed or unsigned requests.
+     */
+    private function readRecipe(WP_REST_Request $request): ?array
+    {
+        if (!empty($_SERVER['HTTP_X_REMOTE_MEDIA_PROXY']) || !RemoteMediaProxy::getInstance()->isConfigured()) {
+            return null;
+        }
+        // Binary responses do not support REST's JSON shaping or envelope mechanisms.
+        foreach (['_fields', '_embed', '_envelope', '_jsonp'] as $parameter) {
+            if ($request->has_param($parameter)) {
+                return null;
+            }
+        }
+        $source = $request->get_url_params()['source'] ?? null;
+        $params = $request->get_query_params();
+        if (!is_string($source)) {
+            return null;
+        }
+        foreach (['width', 'height', 'crop', 'target', 'sig'] as $name) {
+            if (!isset($params[$name]) || !is_string($params[$name])) {
+                return null;
+            }
+        }
+        if (!preg_match('/^[A-Za-z0-9_-]{43}$/D', $params['sig'])) {
+            return null;
+        }
+        $recipe = [
+            'v' => 1,
+            'source' => rawurldecode($source),
+            'target' => $params['target'],
+            'width' => $params['width'],
+            'height' => $params['height'],
+            'crop' => $params['crop'] === 'false' ? false : $params['crop'],
+        ];
+        return $this->validRecipe($recipe) && hash_equals($this->signature($recipe), $params['sig']) ? $recipe : null;
+    }
+
+    /**
+     * Restrict recipes to safe upload paths and the native Resize constructor's supported scalar parameters.
+     *
+     * @param mixed $recipe Decoded instructions or candidate render-time parameters.
+     * @return boolean Whether instructions have the exact supported schema and raster-image policy.
+     */
+    private function validRecipe(mixed $recipe): bool
+    {
+        if (
+            !is_array($recipe) || array_keys($recipe) !== ['v', 'source', 'target', 'width', 'height', 'crop']
+            || $recipe['v'] !== 1 || !is_string($recipe['source']) || !is_string($recipe['target'])
+            || $recipe['source'] === $recipe['target']
+            || !$this->isImage($recipe['source']) || !$this->isImage($recipe['target'])
+        ) {
+            return false;
+        }
+        foreach (['width', 'height'] as $dimension) {
+            $value = $recipe[$dimension];
+            if (!is_numeric($value) || !is_finite((float) $value) || $value < 0 || $value > PHP_INT_MAX) {
+                return false;
+            }
+        }
+        $proxy = RemoteMediaProxy::getInstance();
+        return ($recipe['width'] > 0 || $recipe['height'] > 0)
+            && $proxy->getMimeType($recipe['source']) === $proxy->getMimeType($recipe['target'])
+            && in_array($recipe['crop'], [
+                false, 'default', 'center', 'top', 'bottom', 'left', 'right', 'top-center', 'bottom-center',
+            ], true);
+    }
+
+    /**
+     * Bind stable public instructions to this site and source without exposing source credentials in the URL.
+     *
+     * @param array<string,mixed> $recipe Canonical source, target and operation parameters in a fixed field order.
+     * @return string URL-safe encoding of the full SHA-256 HMAC, without truncating its security strength.
+     */
+    private function signature(array $recipe): string
+    {
+        $options = OptionsMedia::getInstance()->getOptions();
+        $digest = hash_hmac('sha256', serialize([
+            self::REST_NAMESPACE . '/' . self::REST_ROUTE, ABSPATH, get_current_blog_id(), get_option('home'),
+            $options['url'], $options['username'], $options['password'], $recipe,
+        ]), wp_salt('auth'), true);
+        return rtrim(strtr(base64_encode($digest), '+/', '-_'), '=');
     }
 
     /**
@@ -234,78 +477,78 @@ final class Timber
         $base = $view['basedir'] . '/';
         $path = wp_normalize_path($path);
         $relative = str_starts_with($path, $base) ? rawurldecode(substr($path, strlen($base))) : '';
-        if (!$this->isImage($relative) || $relative === $view['source']) {
+        if (
+            !$this->isImage($relative) || $relative === $view['source']
+            || (isset($view['target']) && $view['target'] !== $relative)
+        ) {
             return $path;
         }
-        if (!file_exists($view['basedir'] . '/' . $relative)) {
-            $this->prepareDerivative($call['op'], $view['source'], $relative);
-        }
         $uri = $view['root'] . '/' . $relative;
-        // Preserve Timber's exact public URL, including when neither retrieval nor temporary generation succeeds.
+        // Return the selected URL without any render-time retrieval or image processing.
         $view['paths'] = [$view['sourceUri'] => true, $uri => true];
         $this->operations[$call['op']] = $view;
         return $uri;
     }
 
     /**
-     * Reuse a derivative or run the actual native operation during page rendering after a confirmed remote 404.
+     * Retrieve a derivative or run a validated native resize after a confirmed remote 404.
      *
-     * @param Resize $operation Native operation retaining its original parameters and active WordPress filters.
-     * @param string $source    Validated uploads-relative original path.
-     * @param string $target    Validated uploads-relative derivative path after native destination filters.
-     * @return void
+     * @param Resize       $operation Reconstructed native operation using signed, validated parameters.
+     * @param string       $source    Validated uploads-relative original path.
+     * @param string       $target    Validated uploads-relative derivative path.
+     * @param integer|null $expiresAt Receives the returned bytes' absolute freshness deadline.
+     * @return MediaFile|null Independent result reader, or null when retrieval or generation fails.
      */
-    private function prepareDerivative(Resize $operation, string $source, string $target): void
+    private function openDerivative(Resize $operation, string $source, string $target, ?int &$expiresAt): ?MediaFile
     {
         $proxy = RemoteMediaProxy::getInstance();
         $type = $proxy->getMimeType($target);
         if ($type === null || $type !== $proxy->getMimeType($source)) {
-            return;
+            return null;
         }
         $missing = false;
-        $remote = $proxy->openUpload($target, $missing);
-        if ($remote !== null) {
-            $remote->close();
-            return;
+        $remote = $proxy->openUpload($target, $missing, $expiresAt);
+        if ($remote !== null || !$missing) {
+            return $remote;
         }
-        if (!$missing) {
-            return;
-        }
-        // Only template execution supplies operations; image requests cannot invent resize instructions.
+        // Only signature-validated instructions reach native image processing.
         $reader = $proxy->openUpload($source, $missing, $sourceExpiresAt);
         if ($reader === null) {
-            return;
+            return null;
         }
         $output = null;
         try {
             $input = stream_get_meta_data($reader->stream)['uri'] ?? null;
             $output = $proxy->stageUpload($target);
             if ($output === null || !is_string($input)) {
-                return;
+                return null;
             }
             $original = wp_getimagesize($input);
             if (
                 !is_array($original) || ($original['mime'] ?? null) !== $type
                 || min($original[0], $original[1]) < 1
             ) {
-                return;
+                return null;
             }
             if (!$operation->run($input, $output)) {
-                return;
+                return null;
             }
             // Never publish another format or partial output as the requested derivative.
             $image = wp_getimagesize($output);
             if (is_array($image) && ($image['mime'] ?? null) === $type && min($image[0], $image[1]) > 0) {
-                $proxy->storeUpload($target, $output, $sourceExpiresAt);
+                if ($proxy->storeUpload($target, $output, $sourceExpiresAt)) {
+                    return $proxy->openUpload($target, $missing, $expiresAt);
+                }
             }
         } catch (\Throwable) {
-            // Preserve the exact-URL failure, rather than substituting an original or breaking the page.
+            // Return a controlled image error, never original bytes or an exception's internal details.
         } finally {
             $reader->close();
             if ($output !== null) {
                 TemporaryFile::remove($output);
             }
         }
+        return null;
     }
 
     /**
@@ -367,7 +610,7 @@ final class Timber
                 $args = $frame['args'] ?? [];
                 if (
                     $pathLookup || !is_string($args[0] ?? null) || !(($args[1] ?? null) instanceof Resize)
-                    || !empty($args[2])
+                    || $args[1]::class !== Resize::class || !empty($args[2])
                 ) {
                     return null;
                 }
