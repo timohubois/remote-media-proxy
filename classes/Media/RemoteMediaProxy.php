@@ -39,10 +39,7 @@ final class RemoteMediaProxy
      */
     public static function getInstance(): RemoteMediaProxy
     {
-        if (!self::$instance instanceof RemoteMediaProxy) {
-            self::$instance = new RemoteMediaProxy();
-        }
-        return self::$instance;
+        return self::$instance ??= new self();
     }
 
     /**

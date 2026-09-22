@@ -36,10 +36,7 @@ final class OptionsMedia
      */
     public static function getInstance(): OptionsMedia
     {
-        if (!self::$instance instanceof self) {
-            self::$instance = new self();
-        }
-        return self::$instance;
+        return self::$instance ??= new self();
     }
 
     /**

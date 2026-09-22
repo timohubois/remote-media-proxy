@@ -106,7 +106,7 @@ final class Timber
             return $url;
         }
         $target = rawurldecode(substr($url, strlen($base)));
-        if (!$this->isImage($target) || file_exists($view['basedir'] . '/' . $target)) {
+        if ($this->imageType($target) === null || file_exists($view['basedir'] . '/' . $target)) {
             return $url;
         }
         $recipe = ['v' => 1, 'source' => $view['source'], 'target' => $target];
@@ -273,7 +273,6 @@ final class Timber
             !is_array($recipe) || array_keys($recipe) !== ['v', 'source', 'target', 'width', 'height', 'crop']
             || $recipe['v'] !== 1 || !is_string($recipe['source']) || !is_string($recipe['target'])
             || $recipe['source'] === $recipe['target']
-            || !$this->isImage($recipe['source']) || !$this->isImage($recipe['target'])
         ) {
             return false;
         }
@@ -283,9 +282,9 @@ final class Timber
                 return false;
             }
         }
-        $proxy = RemoteMediaProxy::getInstance();
+        $type = $this->imageType($recipe['source']);
         return ($recipe['width'] > 0 || $recipe['height'] > 0)
-            && $proxy->getMimeType($recipe['source']) === $proxy->getMimeType($recipe['target'])
+            && $type !== null && $type === $this->imageType($recipe['target'])
             && in_array($recipe['crop'], [
                 false, 'default', 'center', 'top', 'bottom', 'left', 'right', 'top-center', 'bottom-center',
             ], true);
@@ -318,7 +317,7 @@ final class Timber
     {
         if (
             !is_array($metadata) || !is_int($attachmentId) || $attachmentId <= 0
-            || !is_string($metadata['file'] ?? null) || !$this->isImage($metadata['file'])
+            || !is_string($metadata['file'] ?? null) || $this->imageType($metadata['file']) === null
             || isset($metadata['_dimensions']) || !empty($_SERVER['HTTP_X_REMOTE_MEDIA_PROXY'])
         ) {
             return $metadata;
@@ -409,7 +408,7 @@ final class Timber
             $relative = $base !== '' && str_starts_with($source, $base) ? substr($source, strlen($base)) : '';
             $decoded = rawurldecode($relative);
             if (
-                str_contains($uploads['basedir'], '://') || !$this->isImage($decoded)
+                str_contains($uploads['basedir'], '://') || $this->imageType($decoded) === null
                 || file_exists($uploads['basedir'] . '/' . $decoded)
                 || !RemoteMediaProxy::getInstance()->isConfigured()
             ) {
@@ -487,7 +486,7 @@ final class Timber
         $path = wp_normalize_path($path);
         $relative = str_starts_with($path, $base) ? rawurldecode(substr($path, strlen($base))) : '';
         if (
-            !$this->isImage($relative) || $relative === $view['source']
+            $this->imageType($relative) === null || $relative === $view['source']
             || (isset($view['target']) && $view['target'] !== $relative)
         ) {
             return $path;
@@ -592,16 +591,16 @@ final class Timber
      * Require a safe raster-image path accepted by the current WordPress MIME policy.
      *
      * @param string $relative Decoded path relative to uploads.
-     * @return boolean Whether the path is eligible for the synthetic filesystem adapter.
+     * @return string|null Allowed raster MIME type, or null for an ineligible path.
      */
-    private function isImage(string $relative): bool
+    private function imageType(string $relative): ?string
     {
         $proxy = RemoteMediaProxy::getInstance();
         if (!$proxy->isValidPath($relative)) {
-            return false;
+            return null;
         }
         $mime = $proxy->getMimeType($relative);
-        return $mime !== null && str_starts_with($mime, 'image/') && $mime !== 'image/svg+xml';
+        return $mime !== null && str_starts_with($mime, 'image/') && $mime !== 'image/svg+xml' ? $mime : null;
     }
 
     /**
