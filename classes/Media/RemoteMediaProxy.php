@@ -6,10 +6,13 @@ use RemoteMediaProxy\Features\OptionsMedia;
 
 defined('ABSPATH') || exit;
 
-/** Coordinate local-first media access, validated remote requests and request-local reuse. */
+/** Coordinate local-first media access, fresh cached downloads and validated remote requests. */
 final class RemoteMediaProxy
 {
-    /** @var array<string, array{path: string, size: int, type: string}|null> Request-local downloads and failed GETs. */
+    /** Maximum reuse time for a validated download, shared with its browser response. */
+    private const int MAX_AGE = 300;
+
+    /** @var array<string,array{path:string,size:int,type:string,expires:int}|null> Unpublished downloads and failed GETs. */
     private array $downloads = [];
 
     /** @var array<string, array{size: int, type: string}|null> Request-local metadata and failed HEADs. */
@@ -43,19 +46,25 @@ final class RemoteMediaProxy
     }
 
     /**
-     * Open a local-first reader while retaining shared downloads until request shutdown.
+     * Open a local-first reader, preferring fresh cached bytes before fetching remotely.
      *
-     * @param string  $relativePath Path relative to the current site's uploads directory.
-     * @param boolean $missing      Receives true only for a confirmed remote HTTP 404.
+     * @param string       $relativePath Path relative to the current site's uploads directory.
+     * @param boolean      $missing      Receives true only for a confirmed remote HTTP 404.
+     * @param integer|null $expiresAt    Receives the remote bytes' deadline, or null for a physical local file.
      * @return MediaFile|null Independent reader owned by the caller, or null when unavailable.
      */
-    public function openUpload(string $relativePath, bool &$missing = false): ?MediaFile
-    {
+    public function openUpload(
+        string $relativePath,
+        bool &$missing = false,
+        ?int &$expiresAt = null
+    ): ?MediaFile {
+        $expiresAt = null;
         $file = $this->fetch($relativePath, false, $missing);
         if ($file === null) {
             return null;
         }
-        $handle = MediaFile::open($file['path'], $file['type']);
+        $expiresAt = $file['expires'] ?? null;
+        $handle = $file['reader'] ?? MediaFile::open($file['path'], $file['type']);
         if ($handle !== null && $handle->size !== $file['size']) {
             $handle->close();
             return null;
@@ -80,7 +89,7 @@ final class RemoteMediaProxy
      * @param string  $relativePath Upload-relative path to validate and resolve.
      * @param boolean $metadataOnly Whether the caller needs metadata rather than file bytes.
      * @param boolean $missing      Receives whether a body request returned HTTP 404.
-     * @return array{size:int,type:string,path?:string}|null Validated result; body retrieval includes a local path.
+     * @return array{size:int,type:string,path?:string,reader?:MediaFile,expires?:int}|null Validated metadata or bytes.
      */
     private function fetch(string $relativePath, bool $metadataOnly, bool &$missing = false): ?array
     {
@@ -102,7 +111,7 @@ final class RemoteMediaProxy
      * @param string  $relativePath Upload-relative path to validate and resolve.
      * @param boolean $metadataOnly Whether to inspect metadata without downloading a body.
      * @param boolean $missing      Receives whether a body request returned HTTP 404.
-     * @return array{size:int,type:string,path?:string}|null Validated result, or null when unavailable.
+     * @return array{size:int,type:string,path?:string,reader?:MediaFile,expires?:int}|null Validated metadata or bytes.
      */
     private function requestUpload(string $relativePath, bool $metadataOnly, bool &$missing): ?array
     {
@@ -124,26 +133,19 @@ final class RemoteMediaProxy
                 ? ['size' => $size, 'type' => $mimeType]
                 : ['path' => $local, 'size' => $size, 'type' => $mimeType];
         }
-        if (!empty($_SERVER['HTTP_X_REMOTE_MEDIA_PROXY'])) {
+        $remote = $this->remoteIdentity($relativePath, $mimeType);
+        if ($remote === null) {
             return null;
         }
-        $options = $this->getConfiguredOptions();
-        if ($options === null) {
-            return null;
+        ['key' => $key, 'url' => $remoteUrl, 'headers' => $headers] = $remote;
+        $cache = new FileCache('remote-media', strtolower(pathinfo($relativePath, PATHINFO_EXTENSION)));
+        $cached = $this->cachedUpload($cache, $key, $mimeType, $metadataOnly);
+        if ($cached !== null) {
+            return $cached;
         }
-        $uploadsPath = rtrim((string) wp_parse_url($uploads['baseurl'], PHP_URL_PATH), '/');
-        $homePath = rtrim((string) wp_parse_url(home_url(), PHP_URL_PATH), '/');
-        if ($homePath !== '' && str_starts_with($uploadsPath, $homePath . '/')) {
-            $uploadsPath = substr($uploadsPath, strlen($homePath));
+        if (isset($this->downloads[$key]) && $this->downloads[$key]['expires'] <= time()) {
+            unset($this->downloads[$key], $this->metadata[$key]);
         }
-        $remoteUrl = rtrim($options['url'], '/') . '/' . trim($uploadsPath, '/') . '/'
-            . implode('/', array_map(rawurlencode(...), explode('/', $relativePath)));
-        $headers = ['Accept-Encoding' => 'identity', 'X-Remote-Media-Proxy' => '1'];
-        if ($options['username'] !== '') {
-            $headers['Authorization'] = 'Basic ' . base64_encode($options['username'] . ':' . $options['password']);
-        }
-        // Resolve configuration and local precedence before reuse. Never share across sites or credentials.
-        $key = hash('sha256', serialize([get_current_blog_id(), $local, $remoteUrl, $headers, $mimeType]));
         if (isset($this->downloads[$key])) {
             $file = $this->downloads[$key];
             clearstatcache(true, $file['path']);
@@ -171,21 +173,83 @@ final class RemoteMediaProxy
             $this->missing[$key] = true;
         }
         if ($file !== null) {
-            $this->downloads[$key] = $file;
             $this->metadata[$key] = ['size' => $file['size'], 'type' => $file['type']];
+            if ($cache->publish($key, $file['path']) !== null) {
+                unset($this->downloads[$key]);
+                return $this->cachedUpload($cache, $key, $mimeType, false);
+            }
+            // Unavailable cache storage must not prevent delivery of a completed, validated download.
+            $this->downloads[$key] = $file;
         }
         return $file;
     }
 
     /**
-     * Successful body downloads remain owned by TemporaryFile until request shutdown.
+     * Resolve source headers and one cache identity for downloaded or generated bytes.
+     *
+     * @param string $relativePath Validated upload-relative path.
+     * @param string $mimeType     MIME type allowed by the current WordPress context.
+     * @return array{key:string,url:string,headers:array<string,string>}|null Source context, or null when disabled.
+     */
+    private function remoteIdentity(string $relativePath, string $mimeType): ?array
+    {
+        if (!empty($_SERVER['HTTP_X_REMOTE_MEDIA_PROXY'])) {
+            return null;
+        }
+        $options = $this->getConfiguredOptions();
+        if ($options === null) {
+            return null;
+        }
+        $uploads = wp_get_upload_dir();
+        $uploadsPath = rtrim((string) wp_parse_url($uploads['baseurl'], PHP_URL_PATH), '/');
+        $homePath = rtrim((string) wp_parse_url(home_url(), PHP_URL_PATH), '/');
+        if ($homePath !== '' && str_starts_with($uploadsPath, $homePath . '/')) {
+            $uploadsPath = substr($uploadsPath, strlen($homePath));
+        }
+        $url = rtrim($options['url'], '/') . '/' . trim($uploadsPath, '/') . '/'
+            . implode('/', array_map(rawurlencode(...), explode('/', $relativePath)));
+        $headers = ['Accept-Encoding' => 'identity', 'X-Remote-Media-Proxy' => '1'];
+        if ($options['username'] !== '') {
+            $headers['Authorization'] = 'Basic ' . base64_encode($options['username'] . ':' . $options['password']);
+        }
+        $key = hash_hmac('sha256', serialize([
+            get_current_blog_id(), $uploads['basedir'] . '/' . $relativePath, $url, $headers, $mimeType,
+        ]), wp_salt('auth'));
+        return ['key' => $key, 'url' => $url, 'headers' => $headers];
+    }
+
+    /**
+     * Read cache metadata or transfer an independently opened reader to the caller.
+     *
+     * @param FileCache $cache        Generic cache scoped to remote downloads.
+     * @param string    $key          Site, source, credentials and MIME-policy identity.
+     * @param string    $type         MIME type allowed by the current WordPress context.
+     * @param boolean   $metadataOnly Whether to close the reader after inspecting its metadata.
+     * @return array{size:int,type:string,reader?:MediaFile,expires?:int}|null Fresh metadata or bytes, or a miss.
+     */
+    private function cachedUpload(FileCache $cache, string $key, string $type, bool $metadataOnly): ?array
+    {
+        $reader = $cache->open($key, $type, self::MAX_AGE, $expiresAt);
+        if ($reader === null) {
+            return null;
+        }
+        $file = ['size' => $reader->size, 'type' => $reader->type];
+        if ($metadataOnly) {
+            $reader->close();
+            return $file;
+        }
+        return $file + ['reader' => $reader, 'expires' => $expiresAt];
+    }
+
+    /**
+     * Validate a remote response; complete body files remain request-owned until cache publication.
      *
      * @param string               $remoteUrl    Source URL with individually encoded upload path segments.
      * @param array<string,string> $headers      Source request headers, including configured authentication.
      * @param string               $mimeType     Expected MIME type allowed by the current WordPress context.
      * @param boolean              $metadataOnly Whether to send HEAD instead of downloading with GET.
      * @param boolean              $missing      Receives whether the remote returned HTTP 404, never a transport error.
-     * @return array{size:int,type:string,path?:string}|null Validated result, or null on rejection or failure.
+     * @return array{size:int,type:string,path?:string,expires?:int}|null Validated result, or null on failure.
      */
     private function requestRemote(
         string $remoteUrl,
@@ -205,7 +269,7 @@ final class RemoteMediaProxy
         if ($timeout > 0) {
             $requestArgs['timeout'] = $timeout;
         }
-        $temporary = $metadataOnly ? null : TemporaryFile::create();
+        $temporary = $metadataOnly ? null : ((new FileCache('remote-media'))->stage() ?? TemporaryFile::create());
         if (!$metadataOnly && $temporary === null) {
             return null;
         }
@@ -257,7 +321,7 @@ final class RemoteMediaProxy
                 return null;
             }
             $complete = true;
-            return ['path' => $temporary, 'size' => $size, 'type' => $mimeType];
+            return ['path' => $temporary, 'size' => $size, 'type' => $mimeType, 'expires' => time() + self::MAX_AGE];
         } finally {
             if ($temporary !== null && !$complete) {
                 TemporaryFile::remove($temporary);

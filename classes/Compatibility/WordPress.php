@@ -2,6 +2,7 @@
 
 namespace RemoteMediaProxy\Compatibility;
 
+use RemoteMediaProxy\Media\MediaFile;
 use RemoteMediaProxy\Media\RemoteMediaProxy;
 use RemoteMediaProxy\Media\VirtualUploads;
 
@@ -56,21 +57,40 @@ final class WordPress
         if (!$proxy->isValidPath($relativePath) || file_exists($uploads['basedir'] . '/' . $relativePath)) {
             return $template;
         }
-        $file = $proxy->openUpload($relativePath);
+        $missing = false;
+        $file = $proxy->openUpload($relativePath, $missing, $expiresAt);
         if ($file === null) {
             return $template;
         }
+        if (self::sendFile($file, $expiresAt)) {
+            exit;
+        }
+        return $template;
+    }
+
+    /**
+     * Deliver validated bytes with only their remaining freshness, never stale-while-revalidate.
+     *
+     * @param MediaFile    $file      Reader consumed and closed by this response adapter.
+     * @param integer|null $expiresAt Absolute remote or generated deadline, or null for physical local bytes.
+     * @return boolean Whether headers and bytes were sent; false leaves normal template handling intact.
+     */
+    public static function sendFile(MediaFile $file, ?int $expiresAt = null): bool
+    {
         try {
+            if (headers_sent()) {
+                return false;
+            }
             // Avoid buffering a large response in a theme or plugin's HTML output buffer.
             while (ob_get_level() > 0) {
                 $buffer = ob_get_status();
                 if (!($buffer['flags'] & PHP_OUTPUT_HANDLER_REMOVABLE) || !ob_end_clean()) {
-                    return $template;
+                    return false;
                 }
             }
             // Buffer finalizers may themselves emit output. Do not send bytes without our response headers.
             if (headers_sent()) {
-                return $template;
+                return false;
             }
             status_header(200);
             // Clear WordPress's 404 cache headers and stale validators before allowing private reuse.
@@ -78,16 +98,27 @@ final class WordPress
             header_remove('Expires');
             header_remove('Pragma');
             header_remove('ETag');
-            header('Cache-Control: private, max-age=300, stale-while-revalidate=60');
+            header('Cache-Control: ' . self::cacheControl($expiresAt));
             header('Content-Type: ' . $file->type);
             header('Content-Length: ' . $file->size);
             header('X-Content-Type-Options: nosniff');
             header("Content-Security-Policy: sandbox; default-src 'none'; style-src 'unsafe-inline'");
             // Binary media, not HTML. The download has already passed MIME and size validation.
             fpassthru($file->stream);
+            return true;
         } finally {
             $file->close();
         }
-        exit;
+    }
+
+    /**
+     * Avoid stacking browser freshness on top of the age of cached media.
+     *
+     * @param integer|null $expiresAt Cached bytes' absolute deadline, or null for physical local bytes.
+     * @return string Private response policy with mandatory revalidation after expiration.
+     */
+    private static function cacheControl(?int $expiresAt): string
+    {
+        return 'private, max-age=' . ($expiresAt === null ? 300 : max(0, $expiresAt - time())) . ', must-revalidate';
     }
 }
