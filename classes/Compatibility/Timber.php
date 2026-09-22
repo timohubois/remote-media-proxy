@@ -4,13 +4,14 @@ namespace RemoteMediaProxy\Compatibility;
 
 use RemoteMediaProxy\Media\StreamWrapper;
 use RemoteMediaProxy\Media\RemoteMediaProxy;
+use RemoteMediaProxy\Media\TemporaryFile;
 use Timber\Image\Operation\Resize;
 use Timber\ImageHelper;
 use WeakMap;
 
 defined('ABSPATH') || exit;
 
-/** Adapt missing-image dimensions and resize URLs without probes, generation or persistent metadata. */
+/** Preserve native resize URLs and use native render-time operations for missing remote derivatives. */
 final class Timber
 {
     /**
@@ -111,7 +112,7 @@ final class Timber
      */
     public function handlers(array $handlers): array
     {
-        // No open handler: this namespace must never expose source bytes or allow image generation.
+        // The virtual namespace exposes metadata only. Native operations receive real temporary files separately.
         $handlers['timber'] = ['stat' => $this->stat(...)];
         return $handlers;
     }
@@ -236,11 +237,75 @@ final class Timber
         if (!$this->isImage($relative) || $relative === $view['source']) {
             return $path;
         }
+        if (!file_exists($view['basedir'] . '/' . $relative)) {
+            $this->prepareDerivative($call['op'], $view['source'], $relative);
+        }
         $uri = $view['root'] . '/' . $relative;
-        // Report a cache hit without probing the source. The browser gets this exact derivative or a 404.
+        // Preserve Timber's exact public URL, including when neither retrieval nor temporary generation succeeds.
         $view['paths'] = [$view['sourceUri'] => true, $uri => true];
         $this->operations[$call['op']] = $view;
         return $uri;
+    }
+
+    /**
+     * Reuse a derivative or run the actual native operation during page rendering after a confirmed remote 404.
+     *
+     * @param Resize $operation Native operation retaining its original parameters and active WordPress filters.
+     * @param string $source    Validated uploads-relative original path.
+     * @param string $target    Validated uploads-relative derivative path after native destination filters.
+     * @return void
+     */
+    private function prepareDerivative(Resize $operation, string $source, string $target): void
+    {
+        $proxy = RemoteMediaProxy::getInstance();
+        $type = $proxy->getMimeType($target);
+        if ($type === null || $type !== $proxy->getMimeType($source)) {
+            return;
+        }
+        $missing = false;
+        $remote = $proxy->openUpload($target, $missing);
+        if ($remote !== null) {
+            $remote->close();
+            return;
+        }
+        if (!$missing) {
+            return;
+        }
+        // Only template execution supplies operations; image requests cannot invent resize instructions.
+        $reader = $proxy->openUpload($source, $missing, $sourceExpiresAt);
+        if ($reader === null) {
+            return;
+        }
+        $output = null;
+        try {
+            $input = stream_get_meta_data($reader->stream)['uri'] ?? null;
+            $output = $proxy->stageUpload($target);
+            if ($output === null || !is_string($input)) {
+                return;
+            }
+            $original = wp_getimagesize($input);
+            if (
+                !is_array($original) || ($original['mime'] ?? null) !== $type
+                || min($original[0], $original[1]) < 1
+            ) {
+                return;
+            }
+            if (!$operation->run($input, $output)) {
+                return;
+            }
+            // Never publish another format or partial output as the requested derivative.
+            $image = wp_getimagesize($output);
+            if (is_array($image) && ($image['mime'] ?? null) === $type && min($image[0], $image[1]) > 0) {
+                $proxy->storeUpload($target, $output, $sourceExpiresAt);
+            }
+        } catch (\Throwable) {
+            // Preserve the exact-URL failure, rather than substituting an original or breaking the page.
+        } finally {
+            $reader->close();
+            if ($output !== null) {
+                TemporaryFile::remove($output);
+            }
+        }
     }
 
     /**
