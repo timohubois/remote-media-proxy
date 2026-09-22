@@ -50,8 +50,22 @@ jobs:
           TIMBER_CONSTRAINT: ${{ matrix.timber }}
         run: |
           mkdir -p "$RUNNER_TEMP/timber"
+          if [ "$TIMBER_CONSTRAINT" = '^1.0' ]; then
+            # Legacy compatibility fixture only; no production or global Composer changes.
+            composer init --working-dir="$RUNNER_TEMP/timber" --name=remote-media-proxy/legacy-fixture --no-interaction
+            composer config --working-dir="$RUNNER_TEMP/timber" allow-plugins.composer/installers false
+            composer config --working-dir="$RUNNER_TEMP/timber" --json policy.advisories.ignore \
+              '{"twig/twig":{"constraint":"^1.0 || ^2.0","reason":"Legacy Timber 1 compatibility fixture only; never shipped with the plugin."}}'
+          fi
           composer require --working-dir="$RUNNER_TEMP/timber" "timber/timber:$TIMBER_CONSTRAINT" --no-interaction --prefer-dist
           composer show --working-dir="$RUNNER_TEMP/timber" timber/timber
+      - name: Report legacy dependency advisories
+        if: matrix.timber == '^1.0'
+        run: |
+          echo '::warning::Timber 1 requires vulnerable legacy Twig. The exception is confined to this disposable test job.'
+          # Ignored Twig advisories remain visible; other security advisories still fail.
+          # Abandoned legacy packages are reported, not treated as security-test failures.
+          composer audit --working-dir="$RUNNER_TEMP/timber" --format=plain --abandoned=report
       - name: Install disposable WordPress
         run: |
           wp core download --path="$RUNNER_TEMP/site"
