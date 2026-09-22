@@ -199,7 +199,7 @@ final class Timber
     public function serveImage(bool $served, WP_HTTP_Response $result, WP_REST_Request $request): bool
     {
         $prefix = '/' . self::REST_NAMESPACE . '/' . self::REST_ROUTE . '/';
-        if ($served || !str_starts_with($request->get_route(), $prefix)) {
+        if ($served || strncasecmp($request->get_route(), $prefix, strlen($prefix)) !== 0) {
             return $served;
         }
         $data = $result->get_data();
@@ -207,8 +207,22 @@ final class Timber
             nocache_headers();
             return false;
         }
-        WordPress::sendFile($data['file'], $data['expires'], true, $request->get_method() === 'HEAD');
-        return true;
+        if (WordPress::sendFile($data['file'], $data['expires'], true, $request->get_method() === 'HEAD')) {
+            return true;
+        }
+        // Never let REST serialize a reader when buffers or prior output prevent binary delivery.
+        $result->set_status(500);
+        $result->set_data([
+            'code' => 'remote_media_proxy_delivery_failed',
+            'message' => __('The image could not be delivered.', 'remote-media-proxy'),
+            'data' => ['status' => 500],
+        ]);
+        if (!headers_sent()) {
+            status_header(500);
+            nocache_headers();
+            header('Content-Type: application/json; charset=' . get_option('blog_charset'));
+        }
+        return false;
     }
 
     /**
