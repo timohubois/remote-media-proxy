@@ -12,142 +12,113 @@ Use production media on local and staging WordPress sites without copying the up
 
 == Description ==
 
-Remote Media Proxy lets developers use a cloned WordPress site without copying its production uploads library. Existing local files are served normally. Missing media is retrieved from the configured remote site without adding files to the uploads library.
+Remote Media Proxy lets developers use cloned WordPress sites without copying production uploads. Existing local files are served first. Missing media is retrieved from a configured source and cached privately, never added to uploads.
 
-The plugin extends **Settings > Media** with an enable checkbox, a remote site URL and optional HTTP Basic Auth credentials. It is disabled by default and does not depend on the WordPress environment type.
+Configure the source and optional HTTP Basic Auth under **Settings > Media**. The plugin is disabled by default and does not depend on the WordPress environment type.
 
-== Key Features ==
-
-* Use production media on local and staging sites without copying or syncing uploads.
-* Serve existing local files first.
-* Support compatible PHP attachment readers through read-only streams.
-* Configure the source and optional Basic Auth in native WordPress Media settings or wp-config.php.
-* Automatically configure missing-upload routing on supported Apache layouts.
-* Support single-site and Multisite without requiring a particular theme or source-side helper.
-
-== Want to contribute? ==
-
-Check out the plugin [GitHub Repository](https://github.com/timohubois/remote-media-proxy/).
+* Local-first browser delivery and compatible read-only PHP attachment streams.
+* Shared five-minute media caching outside known web roots.
+* Signed, on-demand image requests for supported Timber resizes.
+* Automatic missing-upload routing on supported Apache layouts.
+* Per-site settings, Multisite support, and optional code configuration.
+* No source-side plugin required.
 
 == Installation ==
 
-= INSTALL MANUALLY =
+1. Upload the plugin to /wp-content/plugins/remote-media-proxy/ and activate it.
+2. Open **Settings > Media**, enter the source site base URL and any Basic Auth credentials, then enable the proxy.
+3. Review server routing and resolve any warning shown in the site admin.
 
-1. Upload the 'remote-media-proxy' folder to the /wp-content/plugins/ directory.
-2. Activate **Remote Media Proxy** through **Plugins** in WordPress.
-3. Open **Settings > Media** and enter the remote site base URL, not its uploads URL.
-4. Enter Basic Auth credentials if the source requires them.
-5. Check **Enable Remote Media Proxy** and save.
-6. Review your server's rewrite rules and resolve any routing warning shown in the site admin.
+The source must use a different hostname and matching uploads paths relative to its site base. Single-site/Multisite layout differences are not translated automatically. Composer is not required at runtime.
 
-The source must use a different hostname and matching uploads paths relative to its site base. Different single-site/Multisite upload layouts are not translated automatically. Composer is not required at runtime.
+**Apache:** the plugin manages a marked block in WP_CONTENT_DIR/.htaccess. Uploads must be inside the content directory and its public URL path; custom/CDN layouts may not be supported. On Multisite, the upload URL must resolve to the correct site. Child rewrite rules can replace inherited security restrictions: review your server configuration before enabling.
 
-**Apache warning:** rules in wp-content/.htaccess can replace inherited parent rewrite rules, including security restrictions. Review the root, content-directory and server configuration before enabling. The plugin does not preserve rewrite inheritance automatically.
-
-On nginx, Caddy or unsupported Apache layouts, configure missing media requests to reach WordPress's normal front controller rather than a static 404. Preserve script-execution restrictions in uploads.
+On nginx, Caddy or unsupported Apache layouts, route missing upload requests to WordPress's front controller instead of a static 404. Preserve restrictions on script execution in uploads.
 
 == Frequently Asked Questions ==
 
-= Can I configure the plugin in wp-config.php? =
+= How does caching work? =
 
-Yes. Define any of REMOTE_MEDIA_PROXY_ENABLED, REMOTE_MEDIA_PROXY_URL, REMOTE_MEDIA_PROXY_USERNAME and REMOTE_MEDIA_PROXY_PASSWORD before WordPress loads. Use a boolean for ENABLED and strings for the other values. Only defined constants override saved settings; false and empty strings are intentional overrides.
+Browser requests and compatible PHP reads use local files first, then fresh cached bytes, then remote downloads. Metadata checks use local or cached information where available, otherwise HEAD without downloading the body. Failed lookups and HEAD-only results are reused only within the current PHP request.
 
-Constant-controlled fields are disabled in Media settings and cannot be changed through form submissions. URL, username and enablement are shown; constant-controlled password fields stay blank. Code-supplied passwords are not copied into saved settings. Existing saved credentials are retained and take effect again if their constants are removed, provided the WordPress encryption keys have not changed.
+Server entries are fresh for five minutes. Reads do not extend freshness; generated derivatives inherit their cached original's remaining deadline. Expired entries are not served, even if refresh fails. Refreshes download the full file; conditional HTTP revalidation is not implemented.
 
-The remote_media_proxy_options filter runs last: saved settings, then defined constants, then the filter. Use site-wide configuration and visit the site's admin after code configuration changes to update Apache routing. Examples are in the GitHub repository.
+Browsers receive private caching for the remaining server lifetime. Ordinary responses require revalidation after expiry. Signed Timber responses allow another sixty seconds of browser stale-while-revalidate, so supporting browsers can display a previous image during revalidation. The plugin schedules no background refresh. Browser-cached media may remain visible briefly after settings change or the proxy is disabled. Direct local-file responses retain the web server's caching policy.
 
-= Which file types are supported? =
+= Where are files stored and cleaned up? =
 
-The plugin uses WordPress's allowed MIME types through get_allowed_mime_types(), including the upload_mimes filter and applicable user or Multisite restrictions. It does not maintain a separate file-type allowlist or force SVG support. Additional types such as JSON or fonts must be allowed by WordPress. The remote response must match the detected MIME type or use application/octet-stream.
+WordPress selects temporary storage, respecting WP_TEMP_DIR. Storage must be outside known web roots. Downloads and generation require write access; fresh readable cache entries remain usable when their temporary parent becomes read-only.
 
-= Does the plugin download or cache media locally? =
+Complete downloads and generated files are retained in a private installation/site-specific cache, isolated by source and credentials. Publication is atomic, so readers cannot see partially written entries. Concurrent misses may duplicate work. A validated download can still be served request-locally if it cannot be retained; generated derivatives require usable cache storage.
 
-Browser requests and compatible PHP readers share one cache-first backend: existing local files take precedence, then fresh cached files, then remote downloads. Complete validated downloads and locally generated derivatives are retained in private temporary storage for reuse across requests. Each reader has its own file handle. Cache hits create no working files or directories and make no remote requests. Media files are never added to uploads. Metadata checks use local or cached bytes when available, otherwise HEAD without downloading a body; HEAD-only results and failed lookups remain request-local. Other plugins or themes may write their own files.
-
-Proxied media is reusable for up to five minutes. Browser responses receive only the server entry's remaining lifetime. Ordinary media responses use private caching and must-revalidate. Signed Timber image responses allow a further sixty seconds of browser stale-while-revalidate, so supporting browsers can display their previous image during revalidation. The server never serves expired entries, and the plugin schedules no cron or background refresh jobs. Cached media may remain visible briefly after source settings change or the proxy is disabled. Refreshes transfer the full file. Native local-file responses and errors keep their existing caching behavior.
-
-WordPress chooses the temporary directory, including any WP_TEMP_DIR configuration. It must be writable and outside known web roots, including WordPress and uploads directories. If no suitable directory is available, remote file reads are unavailable and browser requests keep normal missing-file handling. Failed downloads are submitted for deletion immediately. Cleanup uses wp_delete_file(); failed or filtered deletions are retained for another attempt at shutdown. At PHP shutdown, remaining reader handles close before unpublished working files are deleted. Retained cache entries survive request cleanup. Interrupted shutdown or a killed worker can leave staging files for the host or administrator to clean up; the plugin never sweeps shared temporary storage.
-
-= Does it generate missing image sizes or support image editing? =
-
-Ordinary media requests require the exact remote file. For supported Timber resize calls, a signed image request can generate a missing remote derivative in private temporary storage. Failed derivatives are never replaced with originals. General image editing, other transformations and code requiring physical files in uploads are not guaranteed compatible.
+There are no cache settings, size limits, eviction or scheduled cleanup jobs. Expiration does not delete files: unused entries may accumulate until the host or administrator removes them. Failed or unpublished working files are cleaned up during the request or at shutdown; interrupted workers or failed/filtered deletions can leave files behind. The plugin never sweeps shared temporary storage or writes media into uploads. Other plugins and themes may do so.
 
 = Does it work with Timber and Flynt resizing? =
 
-With Timber and allow_url_fopen enabled, supported resize calls return signed REST image URLs when the local original and derivative are missing. This includes native PHP calls, Twig's resize filter and Flynt's resizeDynamic when it wraps normal Timber resizing. Rendering builds the URL without downloading or generating the derivative. The image request reuses local or fresh cached bytes, or requests the exact remote derivative. Only a confirmed remote 404 permits retrieving the original and running a native Timber resize. Authentication failures, network failures and other remote errors do not trigger generation. Existing local files retain precedence and native URLs. Cold image requests can still be slow.
+Supported non-forced resizes return signed REST image URLs when the local original and derivative are missing. Rendering creates the URL without retrieving or generating that derivative. The image request tries local or cached bytes, then the exact remote derivative. Only a confirmed remote 404 allows fetching the original and running native Timber resizing. Failed derivatives are not replaced with originals.
 
-For Timber 1 attachment images whose local raster files are missing, valid WordPress attachment dimensions provide width, height and aspect ratio without downloading the image. Stored metadata is not changed. Images without valid attachment dimensions retain native behavior.
+This covers native PHP calls, Twig's resize filter, and Flynt's resizeDynamic when it delegates to normal Timber resizing. It requires allow_url_fopen and REST access for intended image viewers. Existing local files retain precedence and native behavior. For Timber 1, valid attachment metadata also supplies missing images' dimensions without a remote read or database update.
 
-The compatibility adapter uses a read-only, metadata-only filesystem view and depends on Timber internals. It has been tested with Timber 1.22.0, 2.3.3 and 2.4.1. There is no version restriction, but compatibility with other releases is not guaranteed. Forced resizing and SVGs retain native behavior. Flynt's separate on-demand generation route, custom Resize subclasses and arbitrary transformation chains are not covered. Template-scoped processing filters are not automatically transferred into the separate image request.
+Tested with Timber 1.22.0, 2.3.3 and 2.4.1. Compatibility relies on Timber internals; other releases are not guaranteed. Forced resizing, SVG transformations, custom Resize subclasses, arbitrary transformation chains, and Flynt's separate on-demand generation mode are not covered. Filters active only during template rendering are not transferred to the image request.
 
-= Which REST endpoint is used? =
+= What are the signed image URLs? =
 
-The shared API namespace is remote-media-proxy/v1. Currently, only the timber/resize endpoint is registered. It accepts GET and HEAD requests. The URL path retains the original upload filename; query parameters specify width, height, crop, destination and signature. Identical resizes produce identical URLs so browsers can reuse cached images, including when query parameters are present. WordPress supplies the site's REST URL. No custom dispatcher or unused feature routes are added.
+The endpoint is under remote-media-proxy/v1/timber/resize/. It supports GET and HEAD. The path retains the original upload filename; query parameters specify width, height, crop, target and signature. Identical operations produce identical cacheable URLs.
 
-Signatures prevent visitors from inventing resize operations; they do not make a published image URL confidential. No source credentials or serialized PHP objects are included. URLs are stable across renders, but changing source settings or authentication keys invalidates old signatures. Refresh cached HTML after those changes. REST access must be available to intended image viewers; the plugin respects other REST authentication policies.
+Signatures prevent visitors from inventing resize operations; they do not make published URLs confidential. URLs contain no source credentials or serialized PHP objects. Changing source configuration or authentication keys invalidates old signatures, so cached HTML may need refreshing. Other REST authentication policies still apply.
 
-Ordinary upload URLs and compatible PHP reads keep using the same media backend directly.
+A valid signed request can regenerate a derivative after cache expiry or host cleanup, without rerendering the page. Ordinary upload URLs carry no resize instructions and require an exact local, cached or remote file.
 
-= How are cached files stored? =
+= Can PHP read missing attachments? =
 
-All validated remote downloads and generated derivatives share one private, installation/site-specific directory below WordPress's temporary directory. Each media identity has a stable filename, isolated by source and credentials. On a miss, a private staging file is downloaded or generated, validated, and atomically moved into place without copying its contents. Readers cannot observe a partially published file. No lock files or per-operation working directories are created. Concurrent cold requests may duplicate work.
+Compatible readers can use the read-only remotemediaproxy://attachment/ URI returned by get_attached_file(). This requires allow_url_fopen. Obtain the URI afresh each request; do not store it. Existing local files and unfiltered attachment paths remain unchanged. Writes and PHP inclusion are denied; do not enable allow_url_include.
 
-There are no new settings, size limits or scheduled cleanup jobs. Expiration means a cache miss, not deletion. Successful regeneration atomically replaces the expired entry. Unused files may remain until the host or administrator removes them; temporary directories do not guarantee automatic cleanup. Only unpublished or failed working files remain request-owned and are cleaned up. Generating a derivative from a cached original does not extend that original's freshness deadline.
+Code requiring physical files in uploads, arbitrary filesystem reads and general image editing are not guaranteed compatible.
 
-The host may remove cached files at any time. A valid signed Timber image request can regenerate its missing derivative without another page render. Ordinary upload URLs have no resize instructions and still require an exact local, cached or remote file. Unavailable cache storage leaves newly generated derivatives unavailable rather than breaking the page or writing into uploads. A validated remote download can still be served request-locally if it cannot be retained.
+= Which file types and request limits apply? =
 
-= Can PHP read a missing attachment? =
+The plugin follows WordPress's get_allowed_mime_types() policy, including upload_mimes and user/Multisite restrictions. It does not force SVG support or maintain a separate allowlist. Remote responses must match the allowed extension's MIME type or use application/octet-stream. SVG content is not sanitized: trust the source and sanitize SVG before inlining it; browser response headers do not protect PHP-inlined content.
 
-Compatible readers can use the read-only remotemediaproxy://attachment/ path returned by get_attached_file(). This requires allow_url_fopen. Obtain the path afresh for each request; do not store it. Existing local files and unfiltered attachment paths remain unchanged. Writes and PHP inclusion are denied; do not enable allow_url_include.
+Fetches use PHP's positive max_execution_time as the HTTP timeout. With no PHP limit, WordPress's normal timeout applies, usually five seconds and filterable through http_request_timeout. The plugin does not change execution limits or calculate remaining time.
 
-= What happens when the source is unavailable? =
+There are no plugin-imposed file-size caps or upload-quota checks. Downloads stream to disk, but storage can fill and image processing still consumes memory. PHP attachment reads can delay rendering; consumers that load whole files into strings can exhaust memory. This is intended for images and modest-sized files, not large video delivery.
 
-Browser requests retain normal local missing-file handling, and virtual attachment reads become unavailable. Redirects, unsafe requests and invalid media responses are rejected; TLS verification remains enabled. Browser proxying handles GET only. HEAD retains native handling; range requests are not forwarded.
+= What happens if the source is unavailable? =
 
-= What limits apply to remote requests? =
+Local files and fresh cached bytes remain available. On a cache miss, failed retrieval leaves ordinary upload requests with normal missing-file handling, PHP attachment reads unavailable, and signed Timber requests with an image error. Authentication failures, transport errors and server errors do not trigger resize generation.
 
-Each remote fetch uses PHP's max_execution_time as its HTTP timeout when that value is positive. When PHP specifies no limit (0), WordPress's normal timeout applies instead: usually 5 seconds, adjustable through http_request_timeout. The plugin does not change PHP's execution limit or calculate remaining execution time; server/FPM deadlines still apply.
+Redirects, unsafe requests and invalid responses are rejected; TLS verification remains enabled. Ordinary upload proxying handles GET only, leaving HEAD to native handling. Signed Timber requests support GET and HEAD. Range requests are not forwarded.
 
-The plugin imposes no file-size or per-request download-size cap and does not use the site's upload allowance. Downloads stream to temporary storage rather than being buffered in plugin memory. Large files and concurrent requests can exhaust the hosting account's disk quota; PHP and server execution limits still apply.
+= Can I configure the plugin in wp-config.php? =
 
-Missing browser images have separate requests. PHP attachment reads during rendering share the page request, so their delays and temporary storage use can accumulate. Consumers that read entire files into strings can still exhaust PHP memory. The plugin is intended for images and modest-sized files, not large video delivery.
+Define REMOTE_MEDIA_PROXY_ENABLED, REMOTE_MEDIA_PROXY_URL, REMOTE_MEDIA_PROXY_USERNAME and/or REMOTE_MEDIA_PROXY_PASSWORD before WordPress loads. Use a boolean for ENABLED and strings for the other fields. Defined false and empty strings intentionally override saved settings.
 
-= How are protected media and passwords handled? =
+Precedence is saved settings, then defined constants, then the remote_media_proxy_options filter. Constant-controlled fields are disabled, crafted submissions cannot change them, and previously saved values remain available if the constants are removed. Use site-wide configuration and visit the site's admin after code changes to reconcile Apache routing. Examples are in the GitHub README.
 
-Passwords entered in Media settings are stored using Sodium authenticated encryption. The key is derived from the existing AUTH_KEY and AUTH_SALT in wp-config.php and the current site ID. These WordPress keys must be strong strings of at least 32 bytes; no plugin-specific encryption key or setting is required. The plugin uses WordPress's bundled Sodium compatibility layer when needed and never falls back to a database-stored encryption key. Usernames and URLs are not encrypted.
+= How are passwords and protected media handled? =
 
-The database-saved password is decrypted and prefilled in a masked password field. Authorized settings users can inspect its value with browser tools. Edit it to replace the saved password, or clear it and save to remove it. Constant-controlled password fields remain blank and disabled. Passwords supplied through constants or filters are used directly, without copying them into database storage or the form.
+Saved passwords use Sodium authenticated encryption, derived from AUTH_KEY, AUTH_SALT and the site ID. Both WordPress keys must be strings of at least 32 bytes; no database-backed encryption key is used. Changing the keys or site ID makes saved passwords unreadable: re-enter or remove them. Unreadable credentials fail safely unless code supplies a usable password. Encryption failure leaves settings unchanged and shows an error. URLs and usernames are not encrypted.
 
-Basic Auth is optional. A nonempty username enables the Authorization header; an empty password is allowed if the source accepts it. HTTP sends credentials without transport encryption; prefer HTTPS. A password without a username does not enable Basic Auth.
+The saved password is prefilled in a masked field; authorized settings users can inspect it using browser tools. Edit it to replace the password, or clear and save to remove it. Code-supplied passwords are not copied into storage or the form. Constant-controlled password fields stay blank and disabled.
 
-Changing AUTH_KEY, AUTH_SALT or the site ID makes saved passwords unreadable; re-enter or remove the password afterward. Unreadable passwords are not sent to the source, and credential-based retrieval fails safely unless code configuration supplies a usable password. Encryption protects against a database-only leak, not access to wp-config.php or PHP execution.
+A nonempty username enables Basic Auth; an empty password is allowed. Prefer HTTPS because HTTP transmits credentials without transport encryption. Client cookies, authorization and query strings are not forwarded to the source.
 
-If encryption fails, the plugin's settings are left unchanged and an error is shown. Client cookies, authorization and query strings are not forwarded to the source.
+**Protect the destination site separately.** Source authentication does not restrict destination visitors. Encryption protects against a database-only leak, not access to wp-config.php or PHP execution.
 
-**Protect your destination site separately.** Source authentication does not restrict who can view proxied media on your local or staging site.
+= How is routing maintained and removed? =
 
-= Is remote SVG content sanitized? =
+Apache routing is reconciled on activation, settings changes and authorized admin visits, not frontend requests. Updates preserve unrelated file content, stage and verify replacement bytes, and fail without replacing live rules when publication is unsafe. The content directory must be writable; symlinked rules files are not replaced. The plugin does not edit root rules or override server-level static-file handling. Existing files and directories take precedence.
 
-No. Use trusted source content and sanitize SVG before inlining it into HTML. The security headers on browser media responses do not protect content inlined by PHP consumers.
+Routing failures are reported to administrators, including per-site network failures. Disabling or deactivating clears owned directives and retains settings. Uninstall also removes settings, never uploads or attachment data. Cached files are left to host or administrator cleanup; harmless marker comments and the shared rules file remain. Cleanup failures are reported for retry.
 
-= How is Apache routing managed? =
-
-The plugin manages its own marked block in WP_CONTENT_DIR/.htaccess, normally wp-content/.htaccess. Uploads must be inside the content directory and its public URL path; custom/CDN layouts may not be supported. On Multisite, the uploads URL must resolve to the correct site.
-
-Routing is reconciled on activation, settings changes and authorized admin visits, not ordinary frontend requests. Updates are staged and verified before replacing the rules file. The content directory must be writable and support safe file publication; symlinked .htaccess files are not replaced. Failed staging or publication leaves existing rules intact. The plugin does not edit root rules or override server-level static-file handling. Existing files and directories take precedence, but child rules can replace inherited parent rewrites.
-
-Network-wide routing failures are reported per site. A user-specific notice is retained for up to one minute to survive the activation redirect and removed when shown in Network Admin. These notices are not media or metadata caches.
-
-= What happens when I disable or remove the plugin? =
-
-Disabling or deactivating clears owned routing directives and keeps settings. Uninstall also removes the plugin's settings, never uploads or attachment data. Disposable cached files are left to host or administrator cleanup. Harmless marker comments and the shared .htaccess file remain. Cleanup failures are reported so they can be resolved and retried.
-
-Disable routing before moving WordPress or its content directory. Avoid running overlapping upload proxies.
+Disable routing before moving WordPress or its content directory, and avoid overlapping upload proxies.
 
 == Changelog ==
 
 = 1.0.0 =
-* Initial release with opt-in remote media proxying and read-only PHP attachment streams.
-* Automatic Apache routing and lifecycle cleanup.
-* Configuration through Media settings, wp-config.php constants and the options filter.
-* Encrypted storage for saved passwords and masked password controls.
+* Initial release: local-first remote media, read-only attachment streams, private caching and signed Timber resizes.
+* Media settings and code configuration, encrypted passwords, and automatic Apache routing with lifecycle cleanup.
+
+== Development ==
+
+Documentation, contributions and issues: [GitHub](https://github.com/timohubois/remote-media-proxy/).
