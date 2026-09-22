@@ -21,6 +21,58 @@ jobs:
       - run: composer install --no-interaction --prefer-dist
       - run: composer php:lint
 
+  integration:
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        timber: ['^1.0', '^2.0']
+    services:
+      mysql:
+        image: mysql:8.0
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: wordpress
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -proot"
+          --health-interval=10s --health-timeout=5s --health-retries=10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: shivammathur/setup-php@v2
+        with:
+          php-version: '8.3'
+          extensions: gd, imagick, mysqli
+          tools: composer:v2, wp-cli
+      - name: Install isolated Timber dependency
+        env:
+          TIMBER_CONSTRAINT: ${{ matrix.timber }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/timber"
+          composer require --working-dir="$RUNNER_TEMP/timber" "timber/timber:$TIMBER_CONSTRAINT" --no-interaction --prefer-dist
+          composer show --working-dir="$RUNNER_TEMP/timber" timber/timber
+      - name: Install disposable WordPress
+        run: |
+          wp core download --path="$RUNNER_TEMP/site"
+          cd "$RUNNER_TEMP/site"
+          wp config create --dbname=wordpress --dbuser=root --dbpass=root --dbhost=127.0.0.1
+          wp core install --url=http://rmp.test --title=Tests --admin_user=test --admin_password=test-only-password --admin_email=test@example.test --skip-email
+          mkdir -p wp-content/mu-plugins
+          printf '%s\n' \
+            '<?php' \
+            "require \"$RUNNER_TEMP/timber/vendor/autoload.php\";" \
+            'if (is_callable([\Timber\Timber::class, "init"])) {' \
+            '    \Timber\Timber::init();' \
+            '} else {' \
+            '    new \Timber\Timber();' \
+            '}' > wp-content/mu-plugins/timber.php
+          ln -s "$GITHUB_WORKSPACE" wp-content/plugins/remote-media-proxy
+          wp plugin activate remote-media-proxy
+          wp rewrite structure '/%postname%/'
+      - name: Run integration checks
+        run: wp --path="$RUNNER_TEMP/site" eval-file "$GITHUB_WORKSPACE/tests/integration.php"
+
   plugin-check:
     runs-on: ubuntu-24.04
     steps:
