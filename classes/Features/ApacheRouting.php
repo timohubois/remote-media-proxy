@@ -56,6 +56,10 @@ final class ApacheRouting
     /**
      * Reconcile the current site's marked routing block with effective configuration.
      *
+     * Activation, settings changes and authorized admin visits repair missing or stale rules;
+     * frontend requests do not write .htaccess. PHP-FPM/CLI cannot reliably detect Apache
+     * modules, so an inconclusive check permits guarded rules, not proof they work.
+     *
      * @return boolean Whether routing is synchronized or safely removed.
      */
     public function sync(): bool
@@ -69,7 +73,15 @@ final class ApacheRouting
             if (!RemoteMediaProxy::getInstance()->isConfigured()) {
                 return self::remove();
             }
-            if (!got_mod_rewrite()) {
+            // PHP-FPM and WP-CLI cannot inspect Apache modules. A false WordPress result is
+            // inconclusive there; the generated rules are guarded by <IfModule mod_rewrite.c>.
+            $server = is_string($_SERVER['SERVER_SOFTWARE'] ?? null)
+                ? sanitize_text_field(wp_unslash($_SERVER['SERVER_SOFTWARE'])) : '';
+            if (
+                ($server !== '' && !preg_match('/apache|litespeed/i', $server))
+                || (function_exists('apache_get_modules')
+                    && !in_array('mod_rewrite', apache_get_modules(), true))
+            ) {
                 return self::fail(__(
                     'Remote Media Proxy cannot manage Apache rules. Configure media routing manually if needed.',
                     'remote-media-proxy'

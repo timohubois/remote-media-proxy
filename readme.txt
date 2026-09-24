@@ -31,7 +31,7 @@ Configure the source and optional HTTP Basic Auth under **Settings > Media**. Th
 
 The source must use a different hostname and matching uploads paths relative to its site base. Single-site/Multisite layout differences are not translated automatically. Composer is not required at runtime.
 
-**Apache:** the plugin manages a marked block in WP_CONTENT_DIR/.htaccess. Uploads must be inside the content directory and its public URL path; custom/CDN layouts may not be supported. On Multisite, the upload URL must resolve to the correct site. Child rewrite rules can replace inherited security restrictions: review your server configuration before enabling.
+**Apache:** the plugin manages a marked block in WP_CONTENT_DIR/.htaccess. Uploads must be inside the content directory and its public URL path; custom/CDN layouts may not be supported. On Multisite, the upload URL must resolve to the correct site. Child rewrite rules can replace inherited security restrictions: review your server configuration before enabling. PHP-FPM and WP-CLI may not detect mod_rewrite; rules are guarded by IfModule, so check that Apache actually loads it if missing uploads still return 404.
 
 On nginx, Caddy or unsupported Apache layouts, route missing upload requests to WordPress's front controller instead of a static 404. Preserve restrictions on script execution in uploads.
 

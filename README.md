@@ -13,7 +13,7 @@ Existing local files take precedence. Missing media is fetched from a configured
 
 Install in `wp-content/plugins/remote-media-proxy/`, activate, and enable it under **Settings > Media**. Enter the source site URL and optional Basic Auth credentials. Composer is not required at runtime.
 
-**Apache:** review existing rules before enabling. The plugin manages `WP_CONTENT_DIR/.htaccess`; child rules can replace inherited security restrictions. Safe updates require a writable content directory and do not replace symlinked rules files.
+**Apache:** review existing rules before enabling. The plugin manages `WP_CONTENT_DIR/.htaccess`; child rules can replace inherited security restrictions. Safe updates require a writable content directory and do not replace symlinked rules files. PHP-FPM and WP-CLI may not be able to detect `mod_rewrite`; the plugin writes rules guarded by `<IfModule mod_rewrite.c>` unless it can identify an unsupported server or a missing module. Confirm Apache actually loads the module if missing uploads still 404.
 
 **Security:** prefer HTTPS and protect the destination site separately. Source Basic Auth does not restrict destination visitors. Saved passwords are encrypted using WordPress authentication keys; re-enter them after changing those keys.
 
